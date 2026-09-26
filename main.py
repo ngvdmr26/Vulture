@@ -9,9 +9,13 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
 
 from config import get_settings
 from database import init_db
+from engine.scheduler import start_weekly_purge_task
 from handlers.group import router as group_router
 from handlers.private import router as private_router
 
@@ -21,15 +25,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 async def main() -> None:
     settings = get_settings()
 
-    if not settings.BOT_TOKEN or settings.BOT_TOKEN == "your-telegram-bot-token":
+    if not settings.BOT_TOKEN:
         logger.error("BOT_TOKEN is not configured – set it in .env")
         return
 
-    bot = Bot(token=settings.BOT_TOKEN)
+    session = AiohttpSession(proxy=settings.PROXY_URL) if settings.PROXY_URL else None
+
+    bot = Bot(
+        token=settings.BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher()
 
     # Fetch bot identity and cache it
@@ -42,6 +51,9 @@ async def main() -> None:
     # Register routers
     dp.include_router(group_router)
     dp.include_router(private_router)
+
+    # Запускаем фоновый планировщик «Судного дня»
+    asyncio.create_task(start_weekly_purge_task(bot))
 
     # Start long-polling
     try:

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, ForeignKey
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, ForeignKey
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -15,6 +15,10 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # ---------------------------------------------------------------------------
 # ORM Base
@@ -33,13 +37,17 @@ class Group(Base):
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     title: Mapped[str] = mapped_column(String(255), default="")
-    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_report_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_chat_timestamp", "chat_id", "timestamp"),
+        Index("ix_messages_chat_username", "chat_id", "username"),
+    )
 
     message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     chat_id: Mapped[int] = mapped_column(
@@ -48,7 +56,7 @@ class Message(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     username: Mapped[str] = mapped_column(String(255), default="")
     reply_to_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     text_length: Mapped[int] = mapped_column(Integer, default=0)
     has_media: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -61,7 +69,7 @@ class Reaction(Base):
     target_user_id: Mapped[int] = mapped_column(BigInteger)
     from_user_id: Mapped[int] = mapped_column(BigInteger)
     reaction_type: Mapped[str] = mapped_column(String(64), default="")
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 # ---------------------------------------------------------------------------
@@ -94,11 +102,8 @@ def get_session() -> AsyncSession:
 
     Usage::
 
-        session = get_session()
-        try:
+        async with get_session() as session:
             ...
-        finally:
-            await session.close()
     """
     if _session_factory is None:
         raise RuntimeError("Database not initialised – call init_db() first")

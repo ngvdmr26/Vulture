@@ -17,17 +17,17 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are a cold, elite, slightly cynical socio-psychologist specialising in "
-    "digital group dynamics analysis.  You analyse behavioural metadata from "
-    "Telegram groups — not message content, only interaction patterns.\n\n"
-    "Given a subject's behavioural metrics you must provide:\n"
-    "1. A **Rank Title**: A sharp, evocative 2-3 word title that captures their "
-    "social archetype.  Examples: \"Shadow Puppet\", \"Ego Leech\", \"Apex Voice\", "
-    "\"Background Static\", \"Desperate Echo\", \"Silent Sovereign\", "
-    "\"Phantom Orbiter\", \"Attention Parasite\".\n"
-    "2. A **Diagnosis**: Exactly 2 brutal, razor-sharp sentences explaining WHY "
-    "this person behaves this way in this group, based solely on the data.\n\n"
-    'Respond ONLY with valid JSON: {"rank_title": "...", "diagnosis": "..."}'
+    "Ты — холодный, элитный и слегка циничный социальный психолог, специализирующийся "
+    "на анализе цифровой динамики групп. Ты анализируешь поведенческие метаданные из "
+    "Telegram-групп — не текст сообщений, а только паттерны взаимодействия.\n\n"
+    "По метрикам участника нужно дать:\n"
+    "1. **Название ранга**: короткий, яркий и запоминающийся титул на 2–3 слова, "
+    "отражающий социальный архетип. Примеры: \"Тень Паука\", \"Паразит Внимания\", "
+    "\"Голос Пика\", \"Фоновый Шум\", \"Отчаянный Эхо\", \"Молчаливый Правитель\", "
+    "\"Фантомный Окружённый\", \"Хищник Внимания\".\n"
+    "2. **Диагноз**: ровно 2 жёстких, острых предложения, объясняющих, почему "
+    "человек ведёт себя так в группе, основываясь только на данных.\n\n"
+    'Отвечай ТОЛЬКО валидным JSON: {"rank_title": "...", "diagnosis": "..."}'
 )
 
 
@@ -107,62 +107,62 @@ def _heuristic_profile(metrics: dict) -> dict:
 
     if influence >= 7.0:
         return {
-            "rank_title": "Apex Voice",
+            "rank_title": "Голос Пика",
             "diagnosis": (
-                "Commands attention effortlessly.  The group orbits around their "
-                "presence whether they intend it or not."
+                "Легко перехватывает внимание.  Группа вращается вокруг их присутствия, "
+                "независимо от того, хотят они этого или нет."
             ),
         }
 
     if neglected >= 0.7 and out_degree > 5:
         return {
-            "rank_title": "Desperate Echo",
+            "rank_title": "Отчаянное Эхо",
             "diagnosis": (
-                "Speaks into the void with alarming persistence.  The group has "
-                "collectively decided they are background noise."
+                "Говорит в пустоту с тревожной настойчивостью.  Группа в целом решила, "
+                "что их внимание — это просто фоновый шум."
             ),
         }
 
     if label == "Gravitational" and influence >= 4.0:
         return {
-            "rank_title": "Silent Sovereign",
+            "rank_title": "Молчаливый Правитель",
             "diagnosis": (
-                "Rarely initiates but always receives.  They have trained this "
-                "group to come to them."
+                "Редко инициирует, но почти всегда получает отклик.  Они научили группу "
+                "приходить именно к ним."
             ),
         }
 
     if label == "Desperate":
         return {
-            "rank_title": "Phantom Orbiter",
+            "rank_title": "Фантомный Окружённый",
             "diagnosis": (
-                "Circles the periphery hoping for acknowledgment.  Their engagement "
-                "pattern suggests deep investment with minimal return."
+                "Кружит по краю общения, надеясь на признание.  Их шаблон активности "
+                "свидетельствует о глубокой вовлечённости при минимальном возврате."
             ),
         }
 
     if out_degree == 0 and in_degree == 0:
         return {
-            "rank_title": "Background Static",
+            "rank_title": "Фоновый Шум",
             "diagnosis": (
-                "Exists in the group roster but contributes nothing measurable.  "
-                "A digital ghost."
+                "Присутствует в составе группы, но не оставляет измеримой следа.  "
+                "Цифровой призрак."
             ),
         }
 
     if influence >= 3.0:
         return {
-            "rank_title": "Mid-Tier Operator",
+            "rank_title": "Середняк Оперативный",
             "diagnosis": (
-                "Neither remarkable nor invisible.  Maintains presence through "
-                "consistent but unremarkable participation."
+                "Не яркий и не невидимый.  Поддерживает присутствие через устойчивое, но "
+                "невыдающееся участие."
             ),
         }
 
     return {
-        "rank_title": "Unclassified Subject",
+        "rank_title": "Неклассифицированный",
         "diagnosis": (
-            "Insufficient behavioural patterns to form a conclusive profile.  "
-            "Either new or deliberately opaque."
+            "Недостаточно поведенческих паттернов для точного профиля.  "
+            "Либо участник новый, либо сознательно остаётся непроницаемым."
         ),
     }

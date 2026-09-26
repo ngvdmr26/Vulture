@@ -1,4 +1,5 @@
 aiogram>=3.10,<4.0
+aiohttp-socks>=0.8
 sqlalchemy[asyncio]>=2.0
 aiosqlite>=0.19
 asyncpg>=0.29

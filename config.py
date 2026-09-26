@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     BOT_TOKEN: str = ""
     DATABASE_URL: str = "sqlite+aiosqlite:///./vulture.db"
+    PROXY_URL: str = ""
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL: str = "gpt-4o-mini"

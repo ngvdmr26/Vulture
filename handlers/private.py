@@ -1,15 +1,18 @@
 """Aiogram 3.x router for private (DM) commands.
 
-* ``/start``   – Welcome message.
+* ``/start``   – Animated cyberpunk welcome with capabilities overview.
 * ``/dossier`` – Generate a personal dossier card for a selected group.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime
+from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -27,25 +30,69 @@ from engine.profiler import generate_profile
 logger = logging.getLogger(__name__)
 router = Router(name="private")
 
+DOSSIER_PLACEHOLDER = "<code>[VULTURE] Сканирование графа связей... 💭</code>"
+
+LOADING_PLACEHOLDER = "<code>[VULTURE] Подключение к узлу... 💭</code>"
+
+START_MESSAGE = (
+    "🦅 <b>VULTURE // ТЕРМИНАЛ СОЦИАЛЬНОЙ РАЗВЕДКИ</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Я незаметно отслеживаю динамику группы и строю\n"
+    "психологический портрет по паттернам общения.\n\n"
+    "🔍 <b>Что я делаю в группе:</b>\n"
+    "• Строю социальный граф связей по ответам и реакциям\n"
+    "• Вычисляю влияние участников через PageRank\n"
+    "• Нахожу скрытые альянсы и игнорируемых\n"
+    "• Каждое воскресенье публикую «Судный день»\n\n"
+    "🛡 <b>Зачем писать мне в ЛС:</b>\n"
+    "• <code>/dossier</code> — получить персональную карточку досье\n"
+    "  <i>(выдаётся конфиденциально, не в общем чате)</i>\n\n"
+    "📡 <b>Команды для группы:</b>\n"
+    "• <code>/top</code> — рейтинг влияния участников\n"
+    "• <code>/sync</code> — анализ связи между двумя людьми\n"
+    "• <code>/pulse</code> — сводка аномалий (только для админов)\n\n"
+    "<i>Никакие тексты сообщений не сохраняются — только метаданные.</i>\n\n"
+    "Добавьте меня в группу — и я начну собирать сигналы."
+)
+
+NO_GROUPS_MESSAGE = (
+    "📡 <b>[VULTURE // ОБЪЕКТ НЕ ОБНАРУЖЕН]</b>\n\n"
+    "Вы пока не зафиксированы ни в одном наблюдаемом секторе.\n"
+    "Добавьте бота в ваш чат или проявите активность — и система начнёт сбор телеметрии."
+)
+
+NO_ACTIVE_GROUPS_MESSAGE = (
+    "📡 <b>[VULTURE // СВЯЗЬ ПОТЕРЯНА]</b>\n\n"
+    "У вас нет активных групп, где бот подключён.\n"
+    "Проверьте, что бот всё ещё добавлен в нужный чат."
+)
+
 
 # ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
 
 @router.message(CommandStart(), F.chat.type == "private")
-async def _start(message: TgMessage) -> None:
-    """Send the welcome message."""
-    text = (
-        "🦅 **VULTURE** — Social Graph Intelligence\n\n"
-        "I silently observe group dynamics and build psychological\n"
-        "profiles based on interaction patterns.\n\n"
-        "_No messages are stored. Only metadata._\n\n"
-        "**Commands**\n"
-        "/dossier — Generate your personal dossier card\n"
-        "/start — Show this message\n\n"
-        "Add me to a group to begin surveillance."
-    )
-    await message.answer(text, parse_mode="Markdown")
+async def _start(message: TgMessage, bot: Bot) -> None:
+    """Send the animated welcome message."""
+    start_parts = message.text.split() if message.text else []
+    if len(start_parts) > 1 and start_parts[1].lower() == "dossier":
+        await _dossier(message, bot)
+        return
+
+    # Фаза 1: Мгновенный плейсхолдер подключения
+    try:
+        placeholder = await message.answer(LOADING_PLACEHOLDER, parse_mode=ParseMode.HTML)
+    except TelegramAPIError:
+        return
+
+    await asyncio.sleep(1.2)
+
+    # Фаза 2: Плавное раскрытие полного меню
+    try:
+        await placeholder.edit_text(START_MESSAGE, parse_mode=ParseMode.HTML)
+    except TelegramAPIError:
+        logger.debug("Unable to edit start placeholder for user %s", message.from_user.id if message.from_user else "?")
 
 
 # ---------------------------------------------------------------------------
@@ -60,33 +107,36 @@ async def _dossier(message: TgMessage, bot: Bot) -> None:
     user_id = message.from_user.id
 
     # Find groups where this user has activity
-    session = get_session()
     try:
-        result = await session.execute(
-            select(distinct(DbMessage.chat_id)).where(DbMessage.user_id == user_id)
-        )
-        chat_ids: list[int] = [row for row in result.scalars().all()]
-
-        if not chat_ids:
-            await message.answer(
-                "📡 No telemetry found.  I need to observe you in a group first."
+        async with get_session() as session:
+            result = await session.execute(
+                select(distinct(DbMessage.chat_id)).where(DbMessage.user_id == user_id)
             )
-            return
+            chat_ids: list[int] = [row for row in result.scalars().all()]
 
-        # Fetch group titles
-        result = await session.execute(
-            select(Group).where(Group.chat_id.in_(chat_ids), Group.is_active == True)  # noqa: E712
-        )
-        groups = list(result.scalars().all())
-    finally:
-        await session.close()
+            if not chat_ids:
+                await message.answer(NO_GROUPS_MESSAGE, parse_mode=ParseMode.HTML)
+                return
+
+            # Fetch group titles
+            result = await session.execute(
+                select(Group).where(Group.chat_id.in_(chat_ids), Group.is_active == True)  # noqa: E712
+            )
+            groups = list(result.scalars().all())
+    except Exception:
+        logger.exception("DB error in /dossier for user %s", user_id)
+        try:
+            await message.answer("⚠️ Временная ошибка базы данных. Повторите чуть позже.")
+        except TelegramAPIError:
+            pass
+        return
 
     if not groups:
         # User has messages but the groups may have been deactivated
-        await message.answer(
-            "📡 No active groups found for your account.  "
-            "Make sure the bot is still present in the group."
-        )
+        try:
+            await message.answer(NO_ACTIVE_GROUPS_MESSAGE, parse_mode=ParseMode.HTML)
+        except TelegramAPIError:
+            pass
         return
 
     if len(groups) == 1:
@@ -101,10 +151,15 @@ async def _dossier(message: TgMessage, bot: Bot) -> None:
         builder.button(text=label, callback_data=f"dossier:{g.chat_id}")
     builder.adjust(1)
 
-    await message.answer(
-        "📂 Select a group for your dossier:",
-        reply_markup=builder.as_markup(),
-    )
+    try:
+        await message.answer(
+            "📂 <b>[VULTURE // ВЫБОР СЕКТОРА]</b>\n\n"
+            "Выберите группу, чтобы собрать для вас досье:",
+            reply_markup=builder.as_markup(),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramAPIError:
+        logger.debug("Failed to send group selector to user %s", user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -115,16 +170,26 @@ async def _dossier(message: TgMessage, bot: Bot) -> None:
 async def _on_group_selected(callback: CallbackQuery, bot: Bot) -> None:
     """Handle group selection and generate the dossier card."""
     if callback.from_user is None or callback.message is None:
-        await callback.answer("⚠️ Something went wrong.")
+        try:
+            await callback.answer("⚠️ Что-то пошло не так, давайте попробуем ещё раз.")
+        except TelegramAPIError:
+            pass
         return
 
     try:
         chat_id = int(callback.data.split(":", 1)[1])  # type: ignore[union-attr]
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Invalid selection.")
+        try:
+            await callback.answer("⚠️ Неверный выбор, попробуйте ещё раз.")
+        except TelegramAPIError:
+            pass
         return
 
-    await callback.answer()  # dismiss spinner
+    try:
+        await callback.answer()  # dismiss spinner
+    except TelegramAPIError:
+        pass
+
     await _generate_and_send_dossier(
         callback.message, bot, callback.from_user.id, chat_id,
     )
@@ -141,15 +206,28 @@ async def _generate_and_send_dossier(
     chat_id: int,
 ) -> None:
     """Run the full analytics → profile → render pipeline and send the card."""
-    await bot.send_chat_action(target.chat.id, "upload_photo")
+    try:
+        placeholder = await target.answer(DOSSIER_PLACEHOLDER, parse_mode=ParseMode.HTML)
+    except TelegramAPIError:
+        return
+
+    try:
+        await bot.send_chat_action(target.chat.id, action="upload_photo")
+    except TelegramAPIError:
+        pass
 
     # 1. Metrics
     metrics = await get_user_metrics(chat_id, user_id, days=30)
     if metrics is None:
-        await target.answer(
-            "📡 Insufficient telemetry for your profile in this group.\n"
-            "I need more interaction data before I can compile a dossier."
-        )
+        try:
+            await placeholder.edit_text(
+                "⏳ <b>[КАЛИБРОВКА СЕТИ]</b>\n"
+                "В базе недостаточно данных для математического расчёта.\n"
+                "Система накапливает телеметрию. Повторите запрос чуть позже.",
+                parse_mode=ParseMode.HTML,
+            )
+        except TelegramAPIError:
+            logger.debug("Unable to update dossier placeholder for chat %s", target.chat.id)
         return
 
     # 2. Psychological profile
@@ -158,15 +236,26 @@ async def _generate_and_send_dossier(
     # 3. Merge into a single dict for the card renderer
     card_data = {**metrics, **profile}
 
-    # 4. Render PNG
+    # 4. Render PNG (offload heavy Pillow work to a thread)
     me = await bot.get_me()
     bot_username = me.username or "VultureBot"
     buf = await render_dossier(card_data, bot_username=bot_username)
 
     # 5. Send
     photo = BufferedInputFile(buf.read(), filename="dossier.png")
-    await target.answer_photo(
-        photo,
-        caption=f"🦅 Dossier for **@{metrics['username']}** — _{profile['rank_title']}_",
-        parse_mode="Markdown",
-    )
+    try:
+        await placeholder.delete()
+    except TelegramAPIError:
+        logger.debug("Unable to delete dossier placeholder for chat %s", target.chat.id)
+
+    try:
+        await target.answer_photo(
+            photo,
+            caption=(
+                f"🦅 <b>Персональное досье @{escape(str(metrics['username']))}</b> — "
+                f"<i>{escape(str(profile['rank_title']))}</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramAPIError:
+        logger.debug("Failed to send dossier card for user %s", user_id)
