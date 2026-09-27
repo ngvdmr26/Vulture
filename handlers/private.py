@@ -96,19 +96,6 @@ async def _start(message: TgMessage, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
-# /feedback (private)
-# ---------------------------------------------------------------------------
-
-@router.message(Command("feedback"), F.chat.type == "private")
-async def _feedback_private(message: TgMessage, bot: Bot) -> None:
-    """Handle /feedback in private chats — delegates to shared logic."""
-    logger.info("/feedback triggered in DM by user %s",
-                message.from_user.id if message.from_user else "?")
-    from handlers.feedback import handle_feedback
-    await handle_feedback(message, bot)
-
-
-# ---------------------------------------------------------------------------
 # Group-only command stubs (friendly error in DMs)
 # ---------------------------------------------------------------------------
 

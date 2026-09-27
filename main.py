@@ -17,6 +17,7 @@ from aiogram.types import BotCommand
 from config import get_settings
 from database import init_db
 from engine.scheduler import start_weekly_purge_task
+from handlers.feedback import router as feedback_router
 from handlers.group import router as group_router
 from handlers.private import router as private_router
 
@@ -49,7 +50,9 @@ async def main() -> None:
     # Initialise database (creates tables on first run)
     await init_db()
 
-    # Register routers (private first so DM commands are matched before group filters)
+    # Register routers
+    # feedback first — its FSM text handler must match before the group text logger
+    dp.include_router(feedback_router)
     dp.include_router(private_router)
     dp.include_router(group_router)
 

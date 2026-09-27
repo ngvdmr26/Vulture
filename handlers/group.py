@@ -286,20 +286,7 @@ async def _sync(message: TgMessage, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. FEEDBACK
-# ---------------------------------------------------------------------------
-
-@router.message(Command("feedback"), _GROUP_FILTER)
-async def _feedback_group(message: TgMessage, bot: Bot) -> None:
-    """Handle /feedback in group chats."""
-    logger.info("/feedback triggered in group %s by user %s", message.chat.id,
-                message.from_user.id if message.from_user else "?")
-    from handlers.feedback import handle_feedback
-    await handle_feedback(message, bot)
-
-
-# ---------------------------------------------------------------------------
-# 3. SILENT LOGGERS
+# 2. SILENT LOGGERS
 # ---------------------------------------------------------------------------
 
 @router.message(_GROUP_FILTER, F.text)
