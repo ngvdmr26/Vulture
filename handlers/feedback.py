@@ -1,11 +1,12 @@
 """Vulture Social Graph Intelligence — Feedback Subsystem.
 
-Two-step feedback handler using aiogram FSM.
+Two-step feedback handler using aiogram FSM with animated cooldown.
 Captures bug reports, anomalies, and feature requests.
 """
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import time
@@ -36,6 +37,7 @@ class FeedbackStates(StatesGroup):
 
 _feedback_cooldown: dict[int, float] = {}
 _FEEDBACK_COOLDOWN_SEC = 30
+_TIMER_INTERVAL_SEC = 3  # Безопасный интервал обновления без риска FloodWait
 
 # ---------------------------------------------------------------------------
 # Router
@@ -60,13 +62,13 @@ async def _feedback_start(message: TgMessage, state: FSMContext) -> None:
 
     # Двухэтапный ввод через FSM
     await state.set_state(FeedbackStates.waiting_for_text)
-    
+
     prompt_text = (
         "📡 <b>Канал связи с разработчиком</b>\n\n"
         "Отправьте следующим сообщением отчет об аномалии, баг-репорт или предложение.\n"
         "Для отмены передачи используйте команду /cancel."
     )
-    
+
     try:
         await message.reply(prompt_text, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
@@ -87,7 +89,6 @@ async def _feedback_cancel(message: TgMessage, state: FSMContext) -> None:
 @router.message(FeedbackStates.waiting_for_text)
 async def _feedback_receive_text(message: TgMessage, state: FSMContext) -> None:
     """Step 2: Payload capture and processing."""
-    # Очищаем состояние сразу, чтобы освободить пайплайн
     await state.clear()
 
     if message.from_user is None:
@@ -108,32 +109,70 @@ async def _feedback_receive_text(message: TgMessage, state: FSMContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Core Delivery Logic
+# Core Delivery Logic & Animated Rate-Limiter
 # ---------------------------------------------------------------------------
 
 async def _process_feedback_text(message: TgMessage, text: str) -> None:
-    """Validate cooldown, format report, and route payload to DEVELOPER_ID."""
+    """Validate cooldown with dynamic UI, format report, and route payload."""
     if message.from_user is None:
         return
 
     user_id = message.from_user.id
     bot: Bot = message.bot  # type: ignore[assignment]
 
-    # Защита от флуда
+    # Проверка кулдауна
     now = time.monotonic()
     last_time = _feedback_cooldown.get(user_id, 0.0)
-    if now - last_time < _FEEDBACK_COOLDOWN_SEC:
-        remaining = int(_FEEDBACK_COOLDOWN_SEC - (now - last_time))
+    elapsed = now - last_time
+
+    if elapsed < _FEEDBACK_COOLDOWN_SEC:
+        remaining = int(_FEEDBACK_COOLDOWN_SEC - elapsed)
+
+        # Стартовая отрисовка прогресс-бара
+        progress = int((1 - remaining / _FEEDBACK_COOLDOWN_SEC) * 10)
+        bar = "■" * progress + "□" * (10 - progress)
+
         try:
-            await message.reply(
-                f"⏳ Лимит частоты запросов. Повторная отправка доступна через {remaining} сек.",
+            sent_msg = await message.reply(
+                f"⏳ <b>Охлаждение канала связи:</b> {remaining} сек.\n"
+                f"<code>[{bar}]</code> Буферизация...",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramAPIError:
-            pass
+            return
+
+        # Динамический цикл обновления плашки
+        while remaining > 0:
+            await asyncio.sleep(min(_TIMER_INTERVAL_SEC, remaining))
+            remaining -= _TIMER_INTERVAL_SEC
+
+            if remaining <= 0:
+                try:
+                    await sent_msg.edit_text(
+                        "🟢 <b>Канал связи готов к передаче.</b> Повторите отправку фидбека.",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except TelegramAPIError:
+                    pass
+                break
+
+            progress = int((1 - remaining / _FEEDBACK_COOLDOWN_SEC) * 10)
+            bar = "■" * progress + "□" * (10 - progress)
+
+            try:
+                await sent_msg.edit_text(
+                    f"⏳ <b>Охлаждение канала связи:</b> {remaining} сек.\n"
+                    f"<code>[{bar}]</code> Буферизация...",
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramAPIError:
+                # Если сообщение удалили или сеть сбойнула — выходим из цикла
+                break
+
         return
 
-    _feedback_cooldown[user_id] = now
+    # Запоминаем время отправки
+    _feedback_cooldown[user_id] = time.monotonic()
 
     settings = get_settings()
     if not settings.DEVELOPER_ID:
@@ -148,7 +187,6 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
     chat_title = message.chat.title if message.chat.type != "private" else "Direct Message"
     chat_id = message.chat.id
 
-    # Пакет для отправки разработчику
     report = (
         "📥 <b>[VULTURE FEEDBACK INCOMING]</b>\n"
         "────────────────────────\n"
@@ -158,7 +196,6 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
         f"💬 <b>Содержимое:</b>\n{html.escape(text)}"
     )
 
-    # Приводим к int на случай, если из .env прочиталась строка
     dev_target_id = int(settings.DEVELOPER_ID)
 
     try:
