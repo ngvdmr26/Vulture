@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from config import get_settings
 from database import init_db
@@ -51,6 +52,16 @@ async def main() -> None:
     # Register routers
     dp.include_router(group_router)
     dp.include_router(private_router)
+
+    # Register bot commands for the Telegram menu
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Запуск бота / справка"),
+        BotCommand(command="top", description="Рейтинг влияния участников"),
+        BotCommand(command="sync", description="Анализ связи двух участников"),
+        BotCommand(command="pulse", description="Сводка аномалий (админы)"),
+        BotCommand(command="dossier", description="Персональное досье"),
+        BotCommand(command="feedback", description="Связь с разработчиком (баги, идеи)"),
+    ])
 
     # Запускаем фоновый планировщик «Судного дня»
     asyncio.create_task(start_weekly_purge_task(bot))

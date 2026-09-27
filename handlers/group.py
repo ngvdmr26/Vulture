@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import time
 from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
@@ -25,6 +26,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from database import Group, Message, Reaction, get_session
+from config import get_settings
 from engine.card_generator import render_sync_card
 from engine.graph import (
     get_group_anomalies,
@@ -44,11 +46,12 @@ CALIBRATION_MESSAGE = (
 )
 
 WELCOME_MESSAGE = (
-    "🦅 <b>VULTURE // СИСТЕМА ПОДКЛЮЧЕНА</b>\n\n"
-    "Бот запущен в режиме наблюдения: строит граф связей и анализирует активность чата.\n\n"
-    "⏳ <b>Первые 24 часа идет калибровка.</b> Команды пока не трогайте — боту нужно время, "
-    "чтобы накопить данные по переписке и ответам.\n\n"
-    "Первые итоги и рейтинг влияния покажем чуть позже."
+    "🕸 <b>Кто с кем чаще всего общается в этом чате?</b>\n\n"
+    "Я считаю ответы и реакции, чтобы собрать визуальную карту связей сообщества. "
+    "Текст сообщений не читаю и не сохраняю — учитываются только сами взаимодействия.\n\n"
+    "В конце недели выкачу полный граф и топы активности.\n\n"
+    "<i>(Бот находится в режиме открытого тестирования. Если его присутствие "
+    "нежелательно — администраторы могут удалить его в любой момент)</i>"
 )
 
 GROUP_DOSSIER_MESSAGE = (
@@ -285,7 +288,96 @@ async def _sync(message: TgMessage, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. SILENT LOGGERS
+# 2. FEEDBACK
+# ---------------------------------------------------------------------------
+
+# In-memory rate-limit: {user_id: last_feedback_timestamp}
+_feedback_cooldown: dict[int, float] = {}
+_FEEDBACK_COOLDOWN_SEC = 30
+
+
+@router.message(Command("feedback"), _GROUP_FILTER)
+async def _feedback_group(message: TgMessage, bot: Bot) -> None:
+    """Handle /feedback in group chats."""
+    await _handle_feedback(message, bot)
+
+
+async def _handle_feedback(message: TgMessage, bot: Bot) -> None:
+    """Shared /feedback logic for both group and private chats."""
+    if message.from_user is None:
+        return
+
+    user_id = message.from_user.id
+    text = (message.text or "").partition(" ")[2].strip()
+
+    if not text:
+        try:
+            await message.reply(
+                "Использование: /feedback <ваш текст, вопрос или найденный баг>",
+            )
+        except TelegramAPIError:
+            pass
+        return
+
+    # Rate-limit check
+    now = time.monotonic()
+    last_time = _feedback_cooldown.get(user_id, 0.0)
+    if now - last_time < _FEEDBACK_COOLDOWN_SEC:
+        remaining = int(_FEEDBACK_COOLDOWN_SEC - (now - last_time))
+        try:
+            await message.reply(
+                f"⏳ Подождите ещё {remaining} сек. перед повторной отправкой фидбека.",
+            )
+        except TelegramAPIError:
+            pass
+        return
+
+    _feedback_cooldown[user_id] = now
+
+    settings = get_settings()
+    if not settings.DEVELOPER_ID:
+        logger.warning("DEVELOPER_ID is not configured — feedback dropped")
+        try:
+            await message.reply("⚠️ Функция временно недоступна.")
+        except TelegramAPIError:
+            pass
+        return
+
+    username = message.from_user.username or message.from_user.first_name or str(user_id)
+    chat_title = message.chat.title or "Личные сообщения"
+    chat_id = message.chat.id
+
+    report = (
+        "📩 <b>Новый фидбек!</b>\n"
+        f"<b>От:</b> @{html.escape(username)} (ID: <code>{user_id}</code>)\n"
+        f"<b>Чат:</b> {html.escape(chat_title)} (ID: <code>{chat_id}</code>)\n\n"
+        f"<b>Текст:</b>\n{html.escape(text)}"
+    )
+
+    try:
+        await bot.send_message(
+            settings.DEVELOPER_ID,
+            report,
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramAPIError as exc:
+        logger.error("Failed to deliver feedback to developer: %s", exc)
+        try:
+            await message.reply(
+                "Не удалось доставить фидбек из-за ошибки сети. Попробуйте позже.",
+            )
+        except TelegramAPIError:
+            pass
+        return
+
+    try:
+        await message.reply("Спасибо за обратную связь! Сообщение передано разработчику.")
+    except TelegramAPIError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 3. SILENT LOGGERS
 # ---------------------------------------------------------------------------
 
 @router.message(_GROUP_FILTER, F.text)

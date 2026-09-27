@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL: str = "gpt-4o-mini"
+    DEVELOPER_ID: int = 0
 
 
 @lru_cache(maxsize=1)

@@ -96,6 +96,17 @@ async def _start(message: TgMessage, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /feedback (private)
+# ---------------------------------------------------------------------------
+
+@router.message(Command("feedback"), F.chat.type == "private")
+async def _feedback_private(message: TgMessage, bot: Bot) -> None:
+    """Handle /feedback in private chats — delegates to shared logic."""
+    from handlers.group import _handle_feedback
+    await _handle_feedback(message, bot)
+
+
+# ---------------------------------------------------------------------------
 # /dossier
 # ---------------------------------------------------------------------------
 
