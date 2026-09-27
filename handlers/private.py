@@ -102,8 +102,45 @@ async def _start(message: TgMessage, bot: Bot) -> None:
 @router.message(Command("feedback"), F.chat.type == "private")
 async def _feedback_private(message: TgMessage, bot: Bot) -> None:
     """Handle /feedback in private chats — delegates to shared logic."""
-    from handlers.group import _handle_feedback
-    await _handle_feedback(message, bot)
+    from handlers.feedback import handle_feedback
+    await handle_feedback(message, bot)
+
+
+# ---------------------------------------------------------------------------
+# Group-only command stubs (friendly error in DMs)
+# ---------------------------------------------------------------------------
+
+_DM_GROUP_ONLY = (
+    "ℹ️ Эта команда работает только в групповом чате.\n"
+    "Добавьте бота в группу и используйте команду там."
+)
+
+
+@router.message(Command("top"), F.chat.type == "private")
+async def _top_private(message: TgMessage) -> None:
+    """Tell user that /top only works in groups."""
+    try:
+        await message.answer(_DM_GROUP_ONLY)
+    except TelegramAPIError:
+        pass
+
+
+@router.message(Command("sync"), F.chat.type == "private")
+async def _sync_private(message: TgMessage) -> None:
+    """Tell user that /sync only works in groups."""
+    try:
+        await message.answer(_DM_GROUP_ONLY)
+    except TelegramAPIError:
+        pass
+
+
+@router.message(Command("pulse"), F.chat.type == "private")
+async def _pulse_private(message: TgMessage) -> None:
+    """Tell user that /pulse only works in groups."""
+    try:
+        await message.answer(_DM_GROUP_ONLY)
+    except TelegramAPIError:
+        pass
 
 
 # ---------------------------------------------------------------------------

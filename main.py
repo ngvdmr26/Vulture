@@ -49,9 +49,9 @@ async def main() -> None:
     # Initialise database (creates tables on first run)
     await init_db()
 
-    # Register routers
-    dp.include_router(group_router)
+    # Register routers (private first so DM commands are matched before group filters)
     dp.include_router(private_router)
+    dp.include_router(group_router)
 
     # Register bot commands for the Telegram menu
     await bot.set_my_commands([
