@@ -26,6 +26,9 @@ _FEEDBACK_COOLDOWN_SEC = 30
 
 async def handle_feedback(message: TgMessage, bot: Bot) -> None:
     """Shared /feedback logic for both group and private chats."""
+    logger.debug("handle_feedback called by user %s in chat %s",
+                 message.from_user.id if message.from_user else "?", message.chat.id)
+
     if message.from_user is None:
         return
 
@@ -35,10 +38,11 @@ async def handle_feedback(message: TgMessage, bot: Bot) -> None:
     if not text:
         try:
             await message.reply(
-                "Использование: /feedback <ваш текст, вопрос или найденный баг>",
+                "Использование: /feedback ваш текст, вопрос или найденный баг",
+                parse_mode=None,
             )
-        except TelegramAPIError:
-            pass
+        except TelegramAPIError as exc:
+            logger.error("Failed to send feedback usage hint: %s", exc)
         return
 
     # Rate-limit check
@@ -49,9 +53,10 @@ async def handle_feedback(message: TgMessage, bot: Bot) -> None:
         try:
             await message.reply(
                 f"⏳ Подождите ещё {remaining} сек. перед повторной отправкой фидбека.",
+                parse_mode=None,
             )
-        except TelegramAPIError:
-            pass
+        except TelegramAPIError as exc:
+            logger.error("Failed to send feedback cooldown notice: %s", exc)
         return
 
     _feedback_cooldown[user_id] = now
@@ -60,9 +65,12 @@ async def handle_feedback(message: TgMessage, bot: Bot) -> None:
     if not settings.DEVELOPER_ID:
         logger.warning("DEVELOPER_ID is not configured — feedback dropped")
         try:
-            await message.reply("⚠️ Функция временно недоступна.")
-        except TelegramAPIError:
-            pass
+            await message.reply(
+                "⚠️ Функция временно недоступна.",
+                parse_mode=None,
+            )
+        except TelegramAPIError as exc:
+            logger.error("Failed to send feedback unavailable notice: %s", exc)
         return
 
     username = message.from_user.username or message.from_user.first_name or str(user_id)
@@ -87,12 +95,16 @@ async def handle_feedback(message: TgMessage, bot: Bot) -> None:
         try:
             await message.reply(
                 "Не удалось доставить фидбек из-за ошибки сети. Попробуйте позже.",
+                parse_mode=None,
             )
         except TelegramAPIError:
             pass
         return
 
     try:
-        await message.reply("Спасибо за обратную связь! Сообщение передано разработчику.")
-    except TelegramAPIError:
-        pass
+        await message.reply(
+            "✅ Спасибо за обратную связь! Сообщение передано разработчику.",
+            parse_mode=None,
+        )
+    except TelegramAPIError as exc:
+        logger.error("Failed to send feedback confirmation: %s", exc)

@@ -102,6 +102,8 @@ async def _start(message: TgMessage, bot: Bot) -> None:
 @router.message(Command("feedback"), F.chat.type == "private")
 async def _feedback_private(message: TgMessage, bot: Bot) -> None:
     """Handle /feedback in private chats — delegates to shared logic."""
+    logger.info("/feedback triggered in DM by user %s",
+                message.from_user.id if message.from_user else "?")
     from handlers.feedback import handle_feedback
     await handle_feedback(message, bot)
 
@@ -120,27 +122,27 @@ _DM_GROUP_ONLY = (
 async def _top_private(message: TgMessage) -> None:
     """Tell user that /top only works in groups."""
     try:
-        await message.answer(_DM_GROUP_ONLY)
-    except TelegramAPIError:
-        pass
+        await message.answer(_DM_GROUP_ONLY, parse_mode=None)
+    except TelegramAPIError as exc:
+        logger.error("Failed to send /top DM stub: %s", exc)
 
 
 @router.message(Command("sync"), F.chat.type == "private")
 async def _sync_private(message: TgMessage) -> None:
     """Tell user that /sync only works in groups."""
     try:
-        await message.answer(_DM_GROUP_ONLY)
-    except TelegramAPIError:
-        pass
+        await message.answer(_DM_GROUP_ONLY, parse_mode=None)
+    except TelegramAPIError as exc:
+        logger.error("Failed to send /sync DM stub: %s", exc)
 
 
 @router.message(Command("pulse"), F.chat.type == "private")
 async def _pulse_private(message: TgMessage) -> None:
     """Tell user that /pulse only works in groups."""
     try:
-        await message.answer(_DM_GROUP_ONLY)
-    except TelegramAPIError:
-        pass
+        await message.answer(_DM_GROUP_ONLY, parse_mode=None)
+    except TelegramAPIError as exc:
+        logger.error("Failed to send /pulse DM stub: %s", exc)
 
 
 # ---------------------------------------------------------------------------
