@@ -18,7 +18,7 @@ from database import Message, Reaction, get_session
 
 logger = logging.getLogger(__name__)
 
-_MIN_INTERACTIONS = 2
+_MIN_INTERACTIONS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -197,83 +197,98 @@ def find_ignored_users(graph: nx.DiGraph, user_map: dict[int, str]) -> list[dict
 
 async def get_group_anomalies(chat_id: int, days: int = 30) -> dict | None:
     """Telemetry payload for /pulse."""
-    graph, user_map = await build_social_graph(chat_id, days)
-    if graph.number_of_edges() < _MIN_INTERACTIONS:
+    try:
+        graph, user_map = await build_social_graph(chat_id, days)
+        if graph.number_of_edges() < _MIN_INTERACTIONS:
+            return None
+
+        influence = await compute_influence(graph)
+        secret = find_secret_dynamic(graph, user_map)
+        ignored = find_ignored_users(graph, user_map)
+
+        top_influencer = {"username": "N/A", "score": 0.0}
+        if influence:
+            top_uid = max(influence, key=influence.get)
+            top_influencer = {"username": user_map.get(top_uid, f"id_{top_uid}"), "score": round(influence[top_uid], 2)}
+
+        return {
+            "top_influencer": top_influencer,
+            "most_ignored": ignored[0] if ignored else None,
+            "secret_dynamic": secret,
+            "total_users": graph.number_of_nodes(),
+            "total_interactions": graph.number_of_edges(),
+        }
+    except Exception:
+        logger.exception("Failed to compute group anomalies for chat %s", chat_id)
         return None
-
-    influence = await compute_influence(graph)
-    secret = find_secret_dynamic(graph, user_map)
-    ignored = find_ignored_users(graph, user_map)
-
-    top_influencer = {"username": "N/A", "score": 0.0}
-    if influence:
-        top_uid = max(influence, key=influence.get)
-        top_influencer = {"username": user_map.get(top_uid, f"id_{top_uid}"), "score": round(influence[top_uid], 2)}
-
-    return {
-        "top_influencer": top_influencer,
-        "most_ignored": ignored[0] if ignored else None,
-        "secret_dynamic": secret,
-        "total_users": graph.number_of_nodes(),
-        "total_interactions": graph.number_of_edges(),
-    }
 
 
 async def get_group_leaderboard(chat_id: int, limit: int = 5) -> list[dict]:
     """Leaderboard payload for /top."""
-    graph, user_map = await build_social_graph(chat_id, days=30)
-    if graph.number_of_edges() < _MIN_INTERACTIONS:
+    try:
+        graph, user_map = await build_social_graph(chat_id, days=30)
+        if graph.number_of_edges() < _MIN_INTERACTIONS:
+            return []
+
+        influence = await compute_influence(graph)
+        gd = compute_gravity_desperation(graph)
+
+        ranked = sorted(influence.items(), key=lambda x: x[1], reverse=True)[:limit]
+        board = []
+        for rank_idx, (uid, score) in enumerate(ranked, 1):
+            board.append({
+                "rank": rank_idx,
+                "username": user_map.get(uid, f"id_{uid}"),
+                "score": round(score, 1),
+                "status": gd.get(uid, {}).get("label", "Сбалансированный"),
+            })
+        return board
+    except Exception:
+        logger.exception("Failed to compute leaderboard for chat %s", chat_id)
         return []
-
-    influence = await compute_influence(graph)
-    gd = compute_gravity_desperation(graph)
-
-    ranked = sorted(influence.items(), key=lambda x: x[1], reverse=True)[:limit]
-    board = []
-    for rank_idx, (uid, score) in enumerate(ranked, 1):
-        board.append({
-            "rank": rank_idx,
-            "username": user_map.get(uid, f"id_{uid}"),
-            "score": round(score, 1),
-            "status": gd.get(uid, {}).get("label", "Сбалансированный"),
-        })
-    return board
 
 
 async def get_pair_metrics(chat_id: int, user_a_id: int, user_b_id: int, days: int = 30) -> dict | None:
     """Pairwise metrics for the /sync command."""
-    graph, user_map = await build_social_graph(chat_id, days)
-    w_a_to_b = graph[user_a_id][user_b_id].get("weight", 0.0) if graph.has_edge(user_a_id, user_b_id) else 0.0
-    w_b_to_a = graph[user_b_id][user_a_id].get("weight", 0.0) if graph.has_edge(user_b_id, user_a_id) else 0.0
-    total_w = w_a_to_b + w_b_to_a
+    try:
+        graph, user_map = await build_social_graph(chat_id, days)
+        w_a_to_b = graph[user_a_id][user_b_id].get("weight", 0.0) if graph.has_edge(user_a_id, user_b_id) else 0.0
+        w_b_to_a = graph[user_b_id][user_a_id].get("weight", 0.0) if graph.has_edge(user_b_id, user_a_id) else 0.0
+        total_w = w_a_to_b + w_b_to_a
 
-    if total_w == 0:
+        if total_w == 0:
+            return None
+
+        sync_percent = min(100.0, (min(w_a_to_b, w_b_to_a) / max(w_a_to_b, w_b_to_a, 0.1)) * 100.0) if total_w > 0 else 0.0
+
+        u_a_name = user_map.get(user_a_id, f"id_{user_a_id}")
+        u_b_name = user_map.get(user_b_id, f"id_{user_b_id}")
+
+        if sync_percent > 70:
+            verdict = "СИМБИОТИЧЕСКИЙ АЛЬЯНС"
+            desc = "Полный паритет сигналов. Быстрые ответы и взаимное гравитационное притяжение."
+        elif w_a_to_b > w_b_to_a * 2:
+            verdict = f"ОДНОСТОРОННЯЯ ГРАВИТАЦИЯ (@{u_a_name})"
+            desc = f"@{u_a_name} инициирует связь и тратит ресурсы. Второй узел держит холодную дистанцию."
+        elif w_b_to_a > w_a_to_b * 2:
+            verdict = f"ОДНОСТОРОННЯЯ ГРАВИТАЦИЯ (@{u_b_name})"
+            desc = f"@{u_b_name} находится в зависимой орбите, генерируя основной объем импульсов."
+        else:
+            verdict = "УМЕРЕННЫЙ РЕЗОНАНС"
+            desc = "Периодический обмен сигналами без выраженного доминирования одного из узлов."
+
+        return {
+            "user_a": u_a_name,
+            "user_b": u_b_name,
+            "weight_a_to_b": round(w_a_to_b, 1),
+            "weight_b_to_a": round(w_b_to_a, 1),
+            "sync_percent": round(sync_percent, 1),
+            "verdict": verdict,
+            "description": desc,
+        }
+    except Exception:
+        logger.exception("Failed to compute pair metrics for chat %s", chat_id)
         return None
-
-    sync_percent = min(100.0, (min(w_a_to_b, w_b_to_a) / max(w_a_to_b, w_b_to_a, 0.1)) * 100.0) if total_w > 0 else 0.0
-
-    if sync_percent > 70:
-        verdict = "СИМБИОТИЧЕСКИЙ АЛЬЯНС"
-        desc = "Полный паритет сигналов. Быстрые ответы и взаимное гравитационное притяжение."
-    elif w_a_to_b > w_b_to_a * 2:
-        verdict = f"ОДНОСТОРОННЯЯ ГРАВИТАЦИЯ (@{user_map.get(user_a_id)})"
-        desc = f"@{user_map.get(user_a_id)} инициирует связь и тратит ресурсы. Второй узел держит холодную дистанцию."
-    elif w_b_to_a > w_a_to_b * 2:
-        verdict = f"ОДНОСТОРОННЯЯ ГРАВИТАЦИЯ (@{user_map.get(user_b_id)})"
-        desc = f"@{user_map.get(user_b_id)} находится в зависимой орбите, генерируя основной объем импульсов."
-    else:
-        verdict = "УМЕРЕННЫЙ РЕЗОНАНС"
-        desc = "Периодический обмен сигналами без выраженного доминирования одного из узлов."
-
-    return {
-        "user_a": user_map.get(user_a_id, f"id_{user_a_id}"),
-        "user_b": user_map.get(user_b_id, f"id_{user_b_id}"),
-        "weight_a_to_b": round(w_a_to_b, 1),
-        "weight_b_to_a": round(w_b_to_a, 1),
-        "sync_percent": round(sync_percent, 1),
-        "verdict": verdict,
-        "description": desc,
-    }
 
 
 async def get_weekly_purge(chat_id: int) -> dict | None:
@@ -355,36 +370,40 @@ async def get_weekly_purge(chat_id: int) -> dict | None:
 
 async def get_user_metrics(chat_id: int, user_id: int, days: int = 30) -> dict | None:
     """Per-user metrics for dossier."""
-    graph, user_map = await build_social_graph(chat_id, days)
-    if user_id not in graph or graph.number_of_edges() < _MIN_INTERACTIONS:
+    try:
+        graph, user_map = await build_social_graph(chat_id, days)
+        if user_id not in graph or graph.number_of_edges() < _MIN_INTERACTIONS:
+            return None
+
+        influence = await compute_influence(graph)
+        gd = compute_gravity_desperation(graph)
+
+        user_inf = influence.get(user_id, 0.0)
+        user_gd = gd.get(user_id, {"in_degree": 0, "out_degree": 0, "ratio": 0.0, "label": "Сбалансированный"})
+
+        successors = list(graph.successors(user_id))
+        top_target: str | None = None
+        top_target_weight = 0.0
+        for s in successors:
+            w = graph[user_id][s].get("weight", 0)
+            if w > top_target_weight:
+                top_target_weight = w
+                top_target = user_map.get(s, f"id_{s}")
+
+        reciprocated = sum(1 for s in successors if graph.has_edge(s, user_id))
+        out_d = user_gd["out_degree"]
+        neglected_rate = (1.0 - reciprocated / out_d) if out_d > 0 else 0.0
+
+        return {
+            "username": user_map.get(user_id, f"id_{user_id}"),
+            "user_id": user_id,
+            "influence_score": round(user_inf, 2),
+            "top_targeted_user": top_target,
+            "neglected_rate": round(neglected_rate, 3),
+            "in_degree": user_gd["in_degree"],
+            "out_degree": user_gd["out_degree"],
+            "gravity_label": user_gd["label"],
+        }
+    except Exception:
+        logger.exception("Failed to compute user metrics for user %s in chat %s", user_id, chat_id)
         return None
-
-    influence = await compute_influence(graph)
-    gd = compute_gravity_desperation(graph)
-
-    user_inf = influence.get(user_id, 0.0)
-    user_gd = gd.get(user_id, {"in_degree": 0, "out_degree": 0, "ratio": 0.0, "label": "Сбалансированный"})
-
-    successors = list(graph.successors(user_id))
-    top_target: str | None = None
-    top_target_weight = 0.0
-    for s in successors:
-        w = graph[user_id][s].get("weight", 0)
-        if w > top_target_weight:
-            top_target_weight = w
-            top_target = user_map.get(s, f"id_{s}")
-
-    reciprocated = sum(1 for s in successors if graph.has_edge(s, user_id))
-    out_d = user_gd["out_degree"]
-    neglected_rate = (1.0 - reciprocated / out_d) if out_d > 0 else 0.0
-
-    return {
-        "username": user_map.get(user_id, f"id_{user_id}"),
-        "user_id": user_id,
-        "influence_score": round(user_inf, 2),
-        "top_targeted_user": top_target,
-        "neglected_rate": round(neglected_rate, 3),
-        "in_degree": user_gd["in_degree"],
-        "out_degree": user_gd["out_degree"],
-        "gravity_label": user_gd["label"],
-    }

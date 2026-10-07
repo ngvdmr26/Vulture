@@ -38,18 +38,25 @@ router = Router(name="group")
 _GROUP_FILTER = F.chat.type.in_({"group", "supergroup"})
 
 CALIBRATION_MESSAGE = (
-    "⏳ <b>[КАЛИБРОВКА СЕТИ]</b>\n"
-    "В базе недостаточно данных для математического расчёта.\n"
-    "Система накапливает телеметрию. Повторите запрос чуть позже."
+    "📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n"
+    "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
+    "Первые метрики станут доступны по мере активности чата."
 )
 
 WELCOME_MESSAGE = (
-    "🕸 <b>Кто с кем чаще всего общается в этом чате?</b>\n\n"
-    "Я считаю ответы и реакции, чтобы собрать визуальную карту связей сообщества. "
-    "Текст сообщений не читаю и не сохраняю — учитываются только сами взаимодействия.\n\n"
-    "В конце недели выкачу полный граф и топы активности.\n\n"
-    "<i>(Бот находится в режиме открытого тестирования. Если его присутствие "
-    "нежелательно — администраторы могут удалить его в любой момент)</i>"
+    "📊 <b>Vulture запущен в чате: режим сбора связей</b>\n\n"
+    "Всем привет! Я аналитический бот. Моя цель — через 7 дней построить наглядную "
+    "карту общения чата: показать, кто с кем чаще всего ведет диалоги, выделить самые "
+    "активные связки и сформировать недельный рейтинг.\n\n"
+    "⏳ <b>Почему команды пока не работают на полную?</b>\n"
+    "База данных сейчас пуста. Бот начинает считать взаимодействия с нуля. Первые "
+    "осмысленные отчеты (<code>/top</code>, <code>/sync</code>) появятся, когда "
+    "накопится хотя бы несколько дней живой переписки. Сейчас тыкать команды нет "
+    "смысла — просто общайтесь в привычном ритме.\n\n"
+    "🛡 <b>Приватность:</b>\n"
+    "Текст сообщений не сохраняется и не читается. Учитываются только факты "
+    "взаимодействий (кто кому ответил и поставил реакцию).\n\n"
+    "<i>(Бот на тесте. Админы могут удалить его в любой момент, если присутствие нежелательно)</i>"
 )
 
 GROUP_DOSSIER_MESSAGE = (
@@ -289,6 +296,19 @@ async def _sync(message: TgMessage, bot: Bot) -> None:
 # 2. SILENT LOGGERS
 # ---------------------------------------------------------------------------
 
+async def _ensure_group_active(session, chat_id: int, title: str = "") -> None:
+    """Ensure the group record exists and is marked active in the database."""
+    res = await session.execute(select(Group).where(Group.chat_id == chat_id))
+    grp = res.scalar_one_or_none()
+    if grp is None:
+        session.add(Group(chat_id=chat_id, title=title, is_active=True))
+        await session.flush()
+    elif not grp.is_active:
+        grp.is_active = True
+        if title:
+            grp.title = title
+
+
 @router.message(_GROUP_FILTER, F.text)
 async def _log_text_message(message: TgMessage) -> None:
     """Log metadata for every non-command text message."""
@@ -299,6 +319,8 @@ async def _log_text_message(message: TgMessage) -> None:
 
     try:
         async with get_session() as session:
+            await _ensure_group_active(session, message.chat.id, message.chat.title or "")
+
             reply_to_uid: int | None = None
             if message.reply_to_message and message.reply_to_message.from_user:
                 reply_to_uid = message.reply_to_message.from_user.id
@@ -330,6 +352,8 @@ async def _log_media_message(message: TgMessage) -> None:
 
     try:
         async with get_session() as session:
+            await _ensure_group_active(session, message.chat.id, message.chat.title or "")
+
             reply_to_uid: int | None = None
             if message.reply_to_message and message.reply_to_message.from_user:
                 reply_to_uid = message.reply_to_message.from_user.id

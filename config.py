@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,16 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL: str = "gpt-4o-mini"
     DEVELOPER_ID: int = 0
+
+    @field_validator("DEVELOPER_ID", mode="before")
+    @classmethod
+    def _parse_developer_id(cls, value: object) -> int:
+        if not value:
+            return 0
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            return 0
 
 
 @lru_cache(maxsize=1)

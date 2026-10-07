@@ -9,6 +9,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
@@ -41,7 +42,7 @@ async def main() -> None:
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
     # Fetch bot identity and cache it
     me = await bot.get_me()
@@ -67,7 +68,7 @@ async def main() -> None:
     ])
 
     # Запускаем фоновый планировщик «Судного дня»
-    asyncio.create_task(start_weekly_purge_task(bot))
+    purge_task = asyncio.create_task(start_weekly_purge_task(bot))
 
     # Start long-polling
     try:
@@ -81,6 +82,7 @@ async def main() -> None:
             ],
         )
     finally:
+        purge_task.cancel()
         await bot.session.close()
         logger.info("Vulture shut down.")
 

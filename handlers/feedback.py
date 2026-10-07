@@ -11,13 +11,13 @@ import html
 import logging
 import time
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message as TgMessage
+from aiogram.types import ForceReply, Message as TgMessage
 
 from config import get_settings
 
@@ -64,13 +64,18 @@ async def _feedback_start(message: TgMessage, state: FSMContext) -> None:
     await state.set_state(FeedbackStates.waiting_for_text)
 
     prompt_text = (
-        "📡 <b>Канал связи с разработчиком</b>\n\n"
-        "Отправьте следующим сообщением отчет об аномалии, баг-репорт или предложение.\n"
-        "Для отмены передачи используйте команду /cancel."
+        "📡 <b>[VULTURE // КАНАЛ СВЯЗИ]</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Ответьте на это сообщение (Reply) вашим текстом: баг-репорт, найденная аномалия или идея.\n\n"
+        "<i>Для отмены передачи используйте команду</i> /cancel"
     )
 
     try:
-        await message.reply(prompt_text, parse_mode=ParseMode.HTML)
+        await message.reply(
+            prompt_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=ForceReply(selective=True),
+        )
     except TelegramAPIError as exc:
         logger.error("[FEEDBACK] Failed to send prompt: %s", exc)
         await state.clear()
@@ -81,14 +86,19 @@ async def _feedback_cancel(message: TgMessage, state: FSMContext) -> None:
     """Cancel the active feedback transmission."""
     await state.clear()
     try:
-        await message.reply("🛑 Сессия передачи данных отменена.", parse_mode=ParseMode.HTML)
+        await message.reply(
+            "🛑 <b>[VULTURE // СЕССИЯ ПРЕРВАНА]</b>\nПередача данных отменена.",
+            parse_mode=ParseMode.HTML,
+        )
     except TelegramAPIError:
         pass
 
 
-@router.message(FeedbackStates.waiting_for_text)
+@router.message(FeedbackStates.waiting_for_text, F.text)
 async def _feedback_receive_text(message: TgMessage, state: FSMContext) -> None:
     """Step 2: Payload capture and processing."""
+    logger.info("[FEEDBACK] Text received from user %s",
+                message.from_user.id if message.from_user else "?")
     await state.clear()
 
     if message.from_user is None:
@@ -98,7 +108,8 @@ async def _feedback_receive_text(message: TgMessage, state: FSMContext) -> None:
     if not text:
         try:
             await message.reply(
-                "⚠️ Пакет пуст. Повторите отправку: <code>/feedback &lt;сообщение&gt;</code>",
+                "⚠️ <b>[VULTURE // ПУСТОЙ ПАКЕТ]</b>\n"
+                "Сообщение пустое. Повторите отправку: <code>/feedback &lt;сообщение&gt;</code>",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramAPIError:
@@ -134,8 +145,8 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
 
         try:
             sent_msg = await message.reply(
-                f"⏳ <b>Охлаждение канала связи:</b> {remaining} сек.\n"
-                f"<code>[{bar}]</code> Буферизация...",
+                f"⏳ <b>[VULTURE // ОХЛАЖДЕНИЕ КАНАЛА: {remaining} СЕК]</b>\n"
+                f"<code>[{bar}]</code> Буферизация канала связи...",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramAPIError:
@@ -149,7 +160,8 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
             if remaining <= 0:
                 try:
                     await sent_msg.edit_text(
-                        "🟢 <b>Канал связи готов к передаче.</b> Повторите отправку фидбека.",
+                        "🟢 <b>[VULTURE // КАНАЛ ГОТОВ]</b>\n"
+                        "Буферизация завершена. Повторите отправку фидбека.",
                         parse_mode=ParseMode.HTML,
                     )
                 except TelegramAPIError:
@@ -161,8 +173,8 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
 
             try:
                 await sent_msg.edit_text(
-                    f"⏳ <b>Охлаждение канала связи:</b> {remaining} сек.\n"
-                    f"<code>[{bar}]</code> Буферизация...",
+                    f"⏳ <b>[VULTURE // ОХЛАЖДЕНИЕ КАНАЛА: {remaining} СЕК]</b>\n"
+                    f"<code>[{bar}]</code> Буферизация канала связи...",
                     parse_mode=ParseMode.HTML,
                 )
             except TelegramAPIError:
@@ -178,7 +190,11 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
     if not settings.DEVELOPER_ID:
         logger.warning("[FEEDBACK] DEVELOPER_ID missing in configuration.")
         try:
-            await message.reply("⚠️ Модуль связи временно деактивирован на сервере.", parse_mode=ParseMode.HTML)
+            await message.reply(
+                "⚠️ <b>[VULTURE // СЕРВИС НЕДОСТУПЕН]</b>\n"
+                "Модуль связи с разработчиком временно деактивирован на сервере.",
+                parse_mode=ParseMode.HTML,
+            )
         except TelegramAPIError:
             pass
         return
@@ -208,7 +224,8 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
         logger.error("[FEEDBACK] Delivery failed to dev (%s): %s", dev_target_id, exc)
         try:
             await message.reply(
-                "❌ Ошибка маршрутизации пакета. Канал разработчика временно недоступен.",
+                "❌ <b>[VULTURE // СБОЙ МАРШРУТИЗАЦИИ]</b>\n"
+                "Не удалось доставить пакет из-за сетевой ошибки. Попробуйте позже.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramAPIError:
@@ -217,7 +234,8 @@ async def _process_feedback_text(message: TgMessage, text: str) -> None:
 
     try:
         await message.reply(
-            "📡 <b>Пакет доставлен.</b> Данные переданы на центральный узел разработчика.",
+            "📡 <b>[VULTURE // ПАКЕТ ДОСТАВЛЕН]</b>\n"
+            "Данные успешно переданы на терминал разработчика. Спасибо за содействие!",
             parse_mode=ParseMode.HTML,
         )
     except TelegramAPIError as exc:

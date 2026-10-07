@@ -57,7 +57,8 @@ async def generate_profile(user_metrics: dict) -> dict:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        proxy = settings.PROXY_URL or None
+        async with httpx.AsyncClient(proxy=proxy, timeout=30.0) as client:
             resp = await client.post(
                 f"{settings.LLM_BASE_URL}/chat/completions",
                 headers={

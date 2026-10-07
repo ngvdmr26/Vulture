@@ -68,7 +68,9 @@ async def ensure_fonts() -> None:
             continue
         try:
             logger.info("Загрузка шрифта: %s", filename)
-            async with httpx.AsyncClient(follow_redirects=True, timeout=25.0) as client:
+            from config import get_settings
+            proxy = get_settings().PROXY_URL or None
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=25.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 filepath.write_bytes(resp.content)
@@ -187,7 +189,7 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, ma
 
 def _render_dossier_sync(
     profile_data: dict,
-    bot_username: str = "shadow_vulture_graph_bot",
+    bot_username: str = "VultureBot",
 ) -> BytesIO:
     """Рендерит карточку досье 2400x1350 (@2x) и возвращает PNG buffer.
 
@@ -337,7 +339,7 @@ def _render_dossier_sync(
     return buf
 
 
-def _render_sync_card_sync(pair_data: dict, bot_username: str = "shadow_vulture_graph_bot") -> BytesIO:
+def _render_sync_card_sync(pair_data: dict, bot_username: str = "VultureBot") -> BytesIO:
     """Рендерит парную карточку анализа связи 2400x1350 (@2x).
 
     ВНИМАНИЕ: Это CPU-bound функция. Вызывать ТОЛЬКО через asyncio.to_thread().
@@ -418,14 +420,14 @@ def _render_sync_card_sync(pair_data: dict, bot_username: str = "shadow_vulture_
 
 async def render_dossier(
     profile_data: dict,
-    bot_username: str = "shadow_vulture_graph_bot",
+    bot_username: str = "VultureBot",
 ) -> BytesIO:
     """Async wrapper: offloads CPU-heavy Pillow render to a thread pool."""
     await ensure_fonts()
     return await asyncio.to_thread(_render_dossier_sync, profile_data, bot_username)
 
 
-async def render_sync_card(pair_data: dict, bot_username: str = "shadow_vulture_graph_bot") -> BytesIO:
+async def render_sync_card(pair_data: dict, bot_username: str = "VultureBot") -> BytesIO:
     """Async wrapper: offloads CPU-heavy Pillow render to a thread pool."""
     await ensure_fonts()
     return await asyncio.to_thread(_render_sync_card_sync, pair_data, bot_username)

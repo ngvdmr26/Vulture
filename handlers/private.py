@@ -100,7 +100,8 @@ async def _start(message: TgMessage, bot: Bot) -> None:
 # ---------------------------------------------------------------------------
 
 _DM_GROUP_ONLY = (
-    "ℹ️ Эта команда работает только в групповом чате.\n"
+    "⚠️ <b>[ОШИБКА МАРШРУТА]</b>\n"
+    "Данная команда работает только в групповом чате.\n"
     "Добавьте бота в группу и используйте команду там."
 )
 
@@ -109,7 +110,7 @@ _DM_GROUP_ONLY = (
 async def _top_private(message: TgMessage) -> None:
     """Tell user that /top only works in groups."""
     try:
-        await message.answer(_DM_GROUP_ONLY, parse_mode=None)
+        await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
         logger.error("Failed to send /top DM stub: %s", exc)
 
@@ -118,7 +119,7 @@ async def _top_private(message: TgMessage) -> None:
 async def _sync_private(message: TgMessage) -> None:
     """Tell user that /sync only works in groups."""
     try:
-        await message.answer(_DM_GROUP_ONLY, parse_mode=None)
+        await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
         logger.error("Failed to send /sync DM stub: %s", exc)
 
@@ -127,7 +128,7 @@ async def _sync_private(message: TgMessage) -> None:
 async def _pulse_private(message: TgMessage) -> None:
     """Tell user that /pulse only works in groups."""
     try:
-        await message.answer(_DM_GROUP_ONLY, parse_mode=None)
+        await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
         logger.error("Failed to send /pulse DM stub: %s", exc)
 
@@ -258,9 +259,9 @@ async def _generate_and_send_dossier(
     if metrics is None:
         try:
             await placeholder.edit_text(
-                "⏳ <b>[КАЛИБРОВКА СЕТИ]</b>\n"
-                "В базе недостаточно данных для математического расчёта.\n"
-                "Система накапливает телеметрию. Повторите запрос чуть позже.",
+                "📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n"
+                "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
+                "Первые метрики станут доступны по мере активности чата.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramAPIError:

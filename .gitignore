@@ -33,3 +33,4 @@ assets/fonts/*.ttf
 *.egg-info/
 dist/
 build/
+.aider*

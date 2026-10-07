@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, ForeignKey
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -88,11 +88,23 @@ async def init_db(url: str | None = None) -> None:
         from config import get_settings
         url = get_settings().DATABASE_URL
 
-    _engine = create_async_engine(url, echo=False, pool_pre_ping=True)
+    connect_args: dict = {}
+    if "sqlite" in url:
+        connect_args = {"timeout": 30}
+
+    _engine = create_async_engine(
+        url,
+        echo=False,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if "sqlite" in url:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA busy_timeout=30000"))
 
     logger.info("Database initialised – tables ready (%s)", url.split("://")[0])
 

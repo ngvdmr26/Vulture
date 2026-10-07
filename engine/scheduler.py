@@ -122,8 +122,17 @@ async def start_weekly_purge_task(bot: Bot) -> None:
 
                 # Спим 70 сек, чтобы гарантированно не сработать повторно в ту же минуту
                 await asyncio.sleep(70)
+        except asyncio.CancelledError:
+            logger.info("Background Purge Scheduler stopped.")
+            break
         except Exception:
             logger.exception("Scheduler main loop crashed, recovering in 60s...")
-            await asyncio.sleep(60)
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                break
 
-        await asyncio.sleep(40)
+        try:
+            await asyncio.sleep(40)
+        except asyncio.CancelledError:
+            break
