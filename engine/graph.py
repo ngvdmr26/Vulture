@@ -21,6 +21,20 @@ logger = logging.getLogger(__name__)
 _MIN_INTERACTIONS = 5
 
 
+async def get_graph_edge_count(chat_id: int, days: int = 30) -> int:
+    """Return the number of edges in the social graph for *chat_id*.
+
+    Lightweight alternative to building the full graph — used for the
+    progress bar and the calibration-complete notification.
+    """
+    try:
+        graph, _ = await build_social_graph(chat_id, days)
+        return graph.number_of_edges()
+    except Exception:
+        logger.debug("get_graph_edge_count failed for chat %s", chat_id)
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Graph Construction
 # ---------------------------------------------------------------------------
@@ -132,17 +146,35 @@ async def compute_influence(graph: nx.DiGraph) -> dict[int, float]:
 
 
 def compute_gravity_desperation(graph: nx.DiGraph) -> dict[int, dict]:
-    """In-degree / out-degree ratio per node."""
+    """In-degree / out-degree ratio per node with richer status labels.
+
+    Thresholds (softened from 1.3/0.6 to give more diverse status spread):
+      ratio > 2.5  or in>0, out==0 → ТЕНЕВОЙ ЛИДЕР (pure receiver, max influence)
+      ratio > 1.0               → ЦЕНТР ПРИТЯЖЕНИЯ (more in than out)
+      ratio < 0.4               → ИЩУЩИЙ ВНИМАНИЯ (heavy one-way sender)
+      ratio < 0.75              → ФАНТОМНЫЙ ОКРУЖЁННЫЙ (moderate sender bias)
+      otherwise                 → СБАЛАНСИРОВАННЫЙ
+    """
     result: dict[int, dict] = {}
     for node in graph.nodes():
+        in_w = sum(d.get("weight", 1) for _, _, d in graph.in_edges(node, data=True))
+        out_w = sum(d.get("weight", 1) for _, _, d in graph.out_edges(node, data=True))
         in_d = graph.in_degree(node)
         out_d = graph.out_degree(node)
-        ratio = (in_d / out_d) if out_d > 0 else (float("inf") if in_d > 0 else 0.0)
 
-        if ratio > 1.3 or (in_d > 0 and out_d == 0):
+        # Use weighted ratio for classification
+        ratio = (in_w / out_w) if out_w > 0 else (float("inf") if in_d > 0 else 0.0)
+
+        if in_d > 0 and out_d == 0:
+            label = "Теневой лидер"
+        elif ratio > 2.5:
+            label = "Теневой лидер"
+        elif ratio > 1.0:
             label = "Центр притяжения"
-        elif ratio < 0.6:
+        elif ratio < 0.4:
             label = "Ищущий внимания"
+        elif ratio < 0.75:
+            label = "Фантомный окружённый"
         else:
             label = "Сбалансированный"
 
@@ -194,6 +226,41 @@ def find_ignored_users(graph: nx.DiGraph, user_map: dict[int, str]) -> list[dict
 # ---------------------------------------------------------------------------
 # High-Level Handlers Data Payloads
 # ---------------------------------------------------------------------------
+
+async def get_top_active_users(
+    chat_id: int,
+    exclude_user_id: int,
+    limit: int = 6,
+    days: int = 7,
+) -> list[dict]:
+    """Return the top-N most active users in chat_id over the last *days* days.
+
+    Excludes *exclude_user_id* (the command caller).  Used to build the
+    inline keyboard for /sync without arguments.
+
+    Returns a list of ``{"user_id": int, "username": str}`` dicts.
+    """
+    from sqlalchemy import func
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    try:
+        async with get_session() as session:
+            res = await session.execute(
+                select(Message.user_id, Message.username, func.count(Message.message_id).label("cnt"))
+                .where(
+                    Message.chat_id == chat_id,
+                    Message.timestamp >= cutoff,
+                    Message.user_id != exclude_user_id,
+                )
+                .group_by(Message.user_id, Message.username)
+                .order_by(func.count(Message.message_id).desc())
+                .limit(limit)
+            )
+            rows = res.all()
+        return [{"user_id": r.user_id, "username": r.username or f"id_{r.user_id}"} for r in rows]
+    except Exception:
+        logger.exception("Failed to get top active users for chat %s", chat_id)
+        return []
+
 
 async def get_group_anomalies(chat_id: int, days: int = 30) -> dict | None:
     """Telemetry payload for /pulse."""

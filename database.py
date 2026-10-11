@@ -39,6 +39,7 @@ class Group(Base):
     title: Mapped[str] = mapped_column(String(255), default="")
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_initialized: Mapped[bool] = mapped_column(Boolean, default=False)
     last_report_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
 
@@ -105,6 +106,14 @@ async def init_db(url: str | None = None) -> None:
         if "sqlite" in url:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
+            # Migrate: add is_initialized if it doesn't exist yet (safe for existing DBs)
+            try:
+                await conn.execute(
+                    text("ALTER TABLE groups ADD COLUMN is_initialized BOOLEAN NOT NULL DEFAULT 0")
+                )
+                logger.info("Migration: added is_initialized column to groups table")
+            except Exception:
+                pass  # Column already exists — silently ignore
 
     logger.info("Database initialised – tables ready (%s)", url.split("://")[0])
 

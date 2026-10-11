@@ -20,12 +20,13 @@ from aiogram.types import (
     Message as TgMessage,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, distinct
+from sqlalchemy import func, select, distinct
 
 from database import Group, Message as DbMessage, get_session
 from engine.card_generator import render_dossier
 from engine.graph import get_user_metrics
 from engine.profiler import generate_profile
+from services.terminal_ui import safe_delete, send_card_status, send_animated_terminal
 
 logger = logging.getLogger(__name__)
 router = Router(name="private")
@@ -131,6 +132,106 @@ async def _pulse_private(message: TgMessage) -> None:
         await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
         logger.error("Failed to send /pulse DM stub: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# /stats — developer-only telemetry overview
+# ---------------------------------------------------------------------------
+
+@router.message(Command("stats"), F.chat.type == "private")
+async def _stats(message: TgMessage) -> None:
+    """Show global bot statistics. Restricted to DEVELOPER_ID."""
+    if message.from_user is None:
+        return
+
+    from config import get_settings
+    settings = get_settings()
+    if not settings.DEVELOPER_ID or message.from_user.id != settings.DEVELOPER_ID:
+        try:
+            await message.answer(
+                "⛔ <b>[ОТКАЗ В ДОСТУПЕ]</b>\n"
+                "Модуль телеметрии доступен только разработчику.",
+                parse_mode=ParseMode.HTML,
+            )
+        except TelegramAPIError:
+            pass
+        return
+
+    try:
+        from database import Reaction as DbReaction
+        async with get_session() as session:
+            # Active groups
+            res_groups = await session.execute(
+                select(func.count(Group.chat_id)).where(Group.is_active == True)  # noqa: E712
+            )
+            active_groups: int = res_groups.scalar_one() or 0
+
+            # Total groups ever
+            res_total_groups = await session.execute(select(func.count(Group.chat_id)))
+            total_groups: int = res_total_groups.scalar_one() or 0
+
+            # Unique users
+            res_users = await session.execute(
+                select(func.count(distinct(DbMessage.user_id)))
+            )
+            unique_users: int = res_users.scalar_one() or 0
+
+            # Total messages
+            res_msgs = await session.execute(select(func.count(DbMessage.message_id)))
+            total_msgs: int = res_msgs.scalar_one() or 0
+
+            # Total reactions
+            res_rxns = await session.execute(select(func.count(DbReaction.id)))
+            total_rxns: int = res_rxns.scalar_one() or 0
+
+            # Top 5 chats by message count
+            res_top = await session.execute(
+                select(
+                    DbMessage.chat_id,
+                    func.count(DbMessage.message_id).label("cnt"),
+                )
+                .group_by(DbMessage.chat_id)
+                .order_by(func.count(DbMessage.message_id).desc())
+                .limit(5)
+            )
+            top_chats_raw = res_top.all()
+
+            # Fetch group titles for top chats
+            top_chat_ids = [r.chat_id for r in top_chats_raw]
+            res_titles = await session.execute(
+                select(Group.chat_id, Group.title).where(Group.chat_id.in_(top_chat_ids))
+            )
+            title_map = {r.chat_id: r.title for r in res_titles.all()}
+
+    except Exception as exc:
+        logger.exception("Failed to gather stats: %s", exc)
+        try:
+            await message.answer("⚠️ Ошибка получения статистики.", parse_mode=None)
+        except TelegramAPIError:
+            pass
+        return
+
+    top_lines = []
+    for r in top_chats_raw:
+        t = title_map.get(r.chat_id) or f"chat_{r.chat_id}"
+        top_lines.append(f"  • <b>{escape(t)}</b> — {r.cnt} сообщений")
+
+    top_block = "\n".join(top_lines) if top_lines else "  <i>Нет данных</i>"
+
+    report = (
+        "🦅 <b>VULTURE // СВОДКА ТЕЛЕМЕТРИИ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📡 <b>Активных групп:</b> {active_groups} (всего: {total_groups})\n"
+        f"👥 <b>Уникальных узлов:</b> {unique_users}\n"
+        f"💬 <b>Сообщений в БД:</b> {total_msgs}\n"
+        f"⚡ <b>Реакций в БД:</b> {total_rxns}\n\n"
+        f"🔝 <b>Топ активных секторов:</b>\n{top_block}"
+    )
+
+    try:
+        await message.answer(report, parse_mode=ParseMode.HTML)
+    except TelegramAPIError as exc:
+        logger.error("Failed to send /stats: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +345,8 @@ async def _generate_and_send_dossier(
     chat_id: int,
 ) -> None:
     """Run the full analytics → profile → render pipeline and send the card."""
-    try:
-        placeholder = await target.answer(DOSSIER_PLACEHOLDER, parse_mode=ParseMode.HTML)
-    except TelegramAPIError:
-        return
+    # Animated placeholder while we compute
+    status_msg = await send_card_status(target, card_label="СБОРКА ПЕРСОНАЛЬНОГО ДОСЬЕ")
 
     try:
         await bot.send_chat_action(target.chat.id, action="upload_photo")
@@ -257,15 +356,17 @@ async def _generate_and_send_dossier(
     # 1. Metrics
     metrics = await get_user_metrics(chat_id, user_id, days=30)
     if metrics is None:
-        try:
-            await placeholder.edit_text(
-                "📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n"
-                "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
-                "Первые метрики станут доступны по мере активности чата.",
-                parse_mode=ParseMode.HTML,
-            )
-        except TelegramAPIError:
-            logger.debug("Unable to update dossier placeholder for chat %s", target.chat.id)
+        calib_text = (
+            "📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n"
+            "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
+            "Первые метрики станут доступны по мере активности чата."
+        )
+        if status_msg:
+            try:
+                from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+                await status_msg.edit_text(calib_text, parse_mode=ParseMode.HTML)
+            except TelegramAPIError:
+                logger.debug("Unable to update dossier placeholder for chat %s", target.chat.id)
         return
 
     # 2. Psychological profile
@@ -279,13 +380,10 @@ async def _generate_and_send_dossier(
     bot_username = me.username or "VultureBot"
     buf = await render_dossier(card_data, bot_username=bot_username)
 
-    # 5. Send
-    photo = BufferedInputFile(buf.read(), filename="dossier.png")
-    try:
-        await placeholder.delete()
-    except TelegramAPIError:
-        logger.debug("Unable to delete dossier placeholder for chat %s", target.chat.id)
+    # 5. Delete placeholder, send photo
+    await safe_delete(status_msg)
 
+    photo = BufferedInputFile(buf.read(), filename="dossier.png")
     try:
         await target.answer_photo(
             photo,
