@@ -51,7 +51,8 @@ START_MESSAGE = (
     "📡 <b>Команды для группы:</b>\n"
     "• <code>/top</code> — рейтинг влияния участников\n"
     "• <code>/sync</code> — анализ связи между двумя людьми\n"
-    "• <code>/pulse</code> — сводка аномалий (только для админов)\n\n"
+    "• <code>/bets</code> — тотализатор Судного дня\n"
+    "• <code>/brand</code> — навесить клеймо на участника\n\n"
     "<i>Никакие тексты сообщений не сохраняются — только метаданные.</i>\n\n"
     "Добавьте меня в группу — и я начну собирать сигналы."
 )
@@ -123,15 +124,6 @@ async def _sync_private(message: TgMessage) -> None:
         await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
         logger.error("Failed to send /sync DM stub: %s", exc)
-
-
-@router.message(Command("pulse"), F.chat.type == "private")
-async def _pulse_private(message: TgMessage) -> None:
-    """Tell user that /pulse only works in groups."""
-    try:
-        await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
-    except TelegramAPIError as exc:
-        logger.error("Failed to send /pulse DM stub: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +348,18 @@ async def _generate_and_send_dossier(
     # 1. Metrics
     metrics = await get_user_metrics(chat_id, user_id, days=30)
     if metrics is None:
+        import random
+        newcomer_quotes = [
+            "Сигнал пуст. Узел еще не проявился в социальном графе.",
+            "Призрак в системе. База данных пока не зафиксировала здесь следов.",
+            "Тишина в эфире. Никаких следов в матрице чата.",
+        ]
+        chosen_quote = random.choice(newcomer_quotes)
         calib_text = (
-            "📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n"
-            "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
-            "Первые метрики станут доступны по мере активности чата."
+            f"📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n\n"
+            f"<i>{chosen_quote}</i>\n\n"
+            f"Проявите активность в чате (отвечайте на сообщения и ставьте реакции) — "
+            f"и бот построит ваше персональное досье."
         )
         if status_msg:
             try:
@@ -384,13 +384,22 @@ async def _generate_and_send_dossier(
     await safe_delete(status_msg)
 
     photo = BufferedInputFile(buf.read(), filename="dossier.png")
+    trend_icon = metrics.get("trend_arrow", "🔺")
+    in_d = metrics.get("in_degree", 0)
+    out_d = metrics.get("out_degree", 0)
+    rank_idx = metrics.get("rank_in_chat", 1)
+
+    caption = (
+        f"🦅 <b>Персональное досье @{escape(str(metrics['username']))}</b> — "
+        f"<i>{escape(str(profile['rank_title']))}</i>\n\n"
+        f"📊 <b>Динамика:</b> {trend_icon} Ранг в группе: #{rank_idx}\n"
+        f"⚖️ <b>Баланс ответов:</b> входящих [{in_d}] / исходящих [{out_d}]"
+    )
+
     try:
         await target.answer_photo(
             photo,
-            caption=(
-                f"🦅 <b>Персональное досье @{escape(str(metrics['username']))}</b> — "
-                f"<i>{escape(str(profile['rank_title']))}</i>"
-            ),
+            caption=caption,
             parse_mode=ParseMode.HTML,
         )
     except TelegramAPIError:

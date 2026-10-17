@@ -645,51 +645,18 @@ def _assign_archetypes(board: list[dict], graph: nx.DiGraph, user_map: dict[int,
             ratio = top_w / out_w[uid]
             top_target_ratio[uid] = (user_map.get(top_target_uid, f"id_{top_target_uid}"), ratio)
 
-    # Find highest metrics among board entries for assignment
-    best_magnet_uid = None
-    best_magnet_val = -1.0
-    best_generator_uid = None
-    best_generator_val = -1
-    best_sniper_uid = None
-    best_sniper_val = -1.0
-    best_connector_uid = None
-    best_connector_val = -1
+    # Rank metrics across board to find leaders in each dimension
+    by_magnet = sorted(board, key=lambda e: (in_w.get(e["user_id"], 0.0) / max(1, e.get("msg_count", 0))), reverse=True)
+    by_generator = sorted(board, key=lambda e: e.get("msg_count", 0), reverse=True)
+    by_sniper = sorted(board, key=lambda e: (e.get("rxn_count", 0) / max(1, e.get("msg_count", 0))), reverse=True)
+    by_connector = sorted(board, key=lambda e: unique_neighbors.get(e["user_id"], 0), reverse=True)
 
-    for entry in board:
-        uid = entry["user_id"]
-        msg_c = entry.get("msg_count", 0)
-        rxn_c = entry.get("rxn_count", 0)
-        in_deg = in_w.get(uid, 0.0)
-
-        # Magnet: in_replies / messages
-        if msg_c > 0:
-            mag_val = in_deg / msg_c
-            if mag_val > best_magnet_val:
-                best_magnet_val = mag_val
-                best_magnet_uid = uid
-
-        # Generator: total messages
-        if msg_c > best_generator_val:
-            best_generator_val = msg_c
-            best_generator_uid = uid
-
-        # Sniper: reactions / messages
-        if msg_c > 0:
-            snip_val = rxn_c / msg_c
-            if snip_val > best_sniper_val:
-                best_sniper_val = snip_val
-                best_sniper_uid = uid
-
-        # Connector: unique neighbors
-        conn_val = unique_neighbors.get(uid, 0)
-        if conn_val > best_connector_val:
-            best_connector_val = conn_val
-            best_connector_uid = uid
-
-    reserve_archetypes = [
+    reserve_pool = [
+        ("provocateur", "🔥 Провокатор — его реплики вызывают самые бурные споры"),
         ("gold_standard", "⚖️ Золотой стандарт — отвечает другим ровно столько же, сколько отвечают ему"),
         ("backbone", "🛡 Опора режима — стабильный участник основного костяка"),
-        ("provocateur", "🔥 Провокатор — его реплики вызывают самые бурные споры"),
+        ("observer", "🛰 Скрытый наблюдатель — редко пишет, но следит за каждым движением"),
+        ("thunder", "🌪 Буревестник — появляется внезапно и меняет динамику беседы"),
     ]
 
     for i, entry in enumerate(board):
@@ -709,47 +676,48 @@ def _assign_archetypes(board: list[dict], graph: nx.DiGraph, user_map: dict[int,
             assigned_roles.add("grey_cardinal")
             continue
 
-        # 3. Magnet: Магнит внимания
-        if uid == best_magnet_uid and best_magnet_val > 1.2 and "magnet" not in assigned_roles:
+        # 3. Shadow (>40% out-weight to single target)
+        if uid in top_target_ratio:
+            target_name, t_ratio = top_target_ratio[uid]
+            shadow_key = f"shadow_{uid}"
+            if t_ratio > 0.40 and shadow_key not in assigned_roles and "shadow" not in assigned_roles:
+                entry["archetype_label"] = f"🔗 Тень @{target_name} — больше половины его ответов адресованы одному человеку"
+                assigned_roles.add("shadow")
+                assigned_roles.add(shadow_key)
+                continue
+
+        # 4. Magnet: best unassigned in magnet ratio
+        if "magnet" not in assigned_roles and any(e["user_id"] == uid for e in by_magnet[:3]):
             entry["archetype_label"] = "🧲 Магнит внимания — пишет редко, но каждое слово собирает обсуждение"
             assigned_roles.add("magnet")
             continue
 
-        # 4. Shadow: Тень @target (>45% replies to one user)
-        if uid in top_target_ratio:
-            target_name, t_ratio = top_target_ratio[uid]
-            shadow_role_key = f"shadow_{uid}"
-            if t_ratio > 0.45 and shadow_role_key not in assigned_roles:
-                entry["archetype_label"] = f"🔗 Тень @{target_name} — больше половины его ответов адресованы одному человеку"
-                assigned_roles.add(shadow_role_key)
-                continue
-
-        # 5. Connector: Связной
-        if uid == best_connector_uid and best_connector_val >= 3 and "connector" not in assigned_roles:
+        # 5. Connector: best unassigned in unique connections
+        if "connector" not in assigned_roles and any(e["user_id"] == uid for e in by_connector[:3]):
             entry["archetype_label"] = "🕸 Связной — общается с самым большим числом разных людей"
             assigned_roles.add("connector")
             continue
 
-        # 6. Generator: Генератор движа
-        if uid == best_generator_uid and best_generator_val >= 10 and "generator" not in assigned_roles:
+        # 6. Generator: best unassigned in messages
+        if "generator" not in assigned_roles and any(e["user_id"] == uid for e in by_generator[:3]):
             entry["archetype_label"] = "⚡ Генератор движа — главный мотор чата, запускает больше всего диалогов"
             assigned_roles.add("generator")
             continue
 
-        # 7. Sniper: Снайпер
-        if uid == best_sniper_uid and best_sniper_val > 0.5 and "sniper" not in assigned_roles:
+        # 7. Sniper: best unassigned in reactions per msg
+        if "sniper" not in assigned_roles and any(e["user_id"] == uid for e in by_sniper[:3]):
             entry["archetype_label"] = "🎯 Снайпер — мастер метких фраз, собирает максимум реакций"
             assigned_roles.add("sniper")
             continue
 
-        # 8. Reserve: Золотой стандарт / Опора режима
-        for r_key, r_label in reserve_archetypes:
+        # 8. Distinct reserve roles
+        for r_key, r_label in reserve_pool:
             if r_key not in assigned_roles:
                 entry["archetype_label"] = r_label
                 assigned_roles.add(r_key)
                 break
         else:
-            entry.setdefault("archetype_label", "🛡 Опора режима — стабильный участник основного костяка")
+            entry["archetype_label"] = "🛡 Опора режима — стабильный участник основного костяка"
 
     return board
 

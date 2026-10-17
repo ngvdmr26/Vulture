@@ -62,7 +62,6 @@ async def main() -> None:
         BotCommand(command="start", description="Запуск бота / справка"),
         BotCommand(command="top", description="Рейтинг влияния участников"),
         BotCommand(command="sync", description="Анализ связи двух участников"),
-        BotCommand(command="pulse", description="Сводка аномалий (админы)"),
         BotCommand(command="dossier", description="Персональное досье"),
         BotCommand(command="brand", description="Навесить статус на участника (Чёрная метка)"),
         BotCommand(command="bets", description="Тотализатор Судного дня"),

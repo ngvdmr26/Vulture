@@ -1,6 +1,6 @@
 """Aiogram 3.x router for group-chat events.
 
-Commands: /pulse (admin-only), /sync, /top, /dossier, /brand, /bets.
+Commands: /sync, /top, /dossier, /brand, /bets.
 Telemetry: silent message & reaction logging.
 Mini-game: Детектор притяжения (/dossier guessing game) + Глушилка.
 Totalizator: Судный день betting and resolution.
@@ -24,7 +24,6 @@ from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     ChatMemberUpdated,
-    ForceReply,
     Message as TgMessage,
     MessageReactionUpdated,
 )
@@ -42,11 +41,10 @@ from database import (
     get_or_create_user_stats,
     get_session,
 )
-from engine.card_generator import render_sync_card
+from engine.card_generator import render_dossier, render_sync_card
 from engine.graph import (
     _MIN_INTERACTIONS,
     get_graph_edge_count,
-    get_group_anomalies,
     get_group_leaderboard,
     get_leaderboard_with_archetypes,
     get_pair_metrics,
@@ -54,7 +52,7 @@ from engine.graph import (
     get_user_metrics,
 )
 from engine.interceptions import maybe_fire_interception
-from engine.scheduler import send_betting_invitation
+from engine.profiler import generate_profile
 from services.terminal_ui import (
     safe_delete,
     send_animated_terminal,
@@ -73,8 +71,7 @@ CALIBRATION_INITIALIZED_MESSAGE = (
     "Граф социальных связей набрал достаточно данных. Теперь доступны все команды:\n\n"
     "• <code>/top</code> — иерархия влияния в чате\n"
     "• <code>/sync</code> — анализ связи между двумя участниками\n"
-    "• <code>/dossier</code> — личное психологическое досье (в ЛС)\n"
-    "• <code>/pulse</code> — сводка аномалий (только для администраторов)\n"
+    "• <code>/dossier</code> — личное психологическое досье\n"
     "• <code>/bets</code> — тотализатор Судного дня\n"
     "• <code>/brand</code> — навесить клеймо на участника\n\n"
     "<i>Данные обновляются в реальном времени. Еженедельный разбор по воскресеньям.</i>"
@@ -96,15 +93,24 @@ WELCOME_MESSAGE = (
     "<i>(Бот на тесте. Админы могут удалить его в любой момент, если присутствие нежелательно)</i>"
 )
 
-GROUP_DOSSIER_MESSAGE = (
-    "🔒 <b>VULTURE // ПРИВАТНЫЙ ПРОТОКОЛ</b>\n\n"
-    "Персональное досье выдаётся строго конфиденциально в ЛС."
-)
+NEWCOMER_QUOTES = [
+    "Сигнал пуст. Узел еще не проявился в социальном графе.",
+    "Призрак в системе. База данных пока не зафиксировала здесь следов.",
+    "Тишина в эфире. Никаких следов в матрице чата.",
+]
 
-ACCESS_DENIED_MESSAGE = (
-    "⛔ <b>[ОТКАЗ В ДОСТУПЕ]</b>\n"
-    "Модуль телеметрии аномалий доступен только узлам с правами администратора группы."
-)
+SELF_VOTE_QUOTES = [
+    "Авто-привязка отклонена. Искать самого себя в чужих досье запрещено алгоритмом.",
+    "Эго-фильтр активирован. Выберите другую цель в матрице.",
+]
+
+JAMMER_ROAST_QUOTES = [
+    "Ага, классика. Кому-то явно есть что скрывать от социального графа...",
+    "Глушилка активирована. Кто-то слишком сильно боится правды 🕵️‍♂️",
+    "Секретный уровень защиты включен. Паранойя вышла на новый уровень!",
+    "Защитная завеса поставлена. Но мы-то знаем... 😉",
+    "Сигнал заблокирован! Пущены в ход запрещенные приемы.",
+]
 
 
 def _resolve_username(user) -> str:
@@ -114,18 +120,17 @@ def _resolve_username(user) -> str:
     return user.username or user.first_name or f"id_{user.id}"
 
 
-# ---------------------------------------------------------------------------
-# Admin check helper
-# ---------------------------------------------------------------------------
-
-async def _is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Return True if *user_id* is creator or administrator of *chat_id*."""
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member.status in ("creator", "administrator")
-    except TelegramAPIError:
-        logger.debug("Failed to check admin status for user %s in chat %s", user_id, chat_id)
-        return False
+def is_betting_open(now: datetime | None = None) -> bool:
+    """Check if betting is currently open (Saturday 20:00 MSK to Sunday 20:00 MSK)."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    # Saturday 17:00 UTC (20:00 MSK) onwards
+    if now.weekday() == 5 and now.hour >= 17:
+        return True
+    # Sunday before 17:00 UTC (20:00 MSK)
+    if now.weekday() == 6 and now.hour < 17:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +156,7 @@ async def _show_calibration_progress(message: TgMessage, chat_id: int) -> bool:
 
 @router.message(Command("dossier"), _GROUP_FILTER)
 async def _group_dossier(message: TgMessage, bot: Bot) -> None:
-    """Direct the user to a private dossier deep link and launch detector mini-game."""
+    """Send personal dossier to user's DM and launch detector mini-game in group."""
     if message.from_user is None:
         return
 
@@ -159,38 +164,63 @@ async def _group_dossier(message: TgMessage, bot: Bot) -> None:
     user_id = message.from_user.id
     username = _resolve_username(message.from_user)
 
+    metrics = await get_user_metrics(chat_id, user_id, days=30)
+    if not metrics:
+        quote = random.choice(NEWCOMER_QUOTES)
+        text = (
+            f"📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n\n"
+            f"<i>{quote}</i>\n\n"
+            f"Проявите активность в чате (отвечайте на сообщения и ставьте реакции) — "
+            f"и бот построит ваше персональное досье."
+        )
+        try:
+            await message.reply(text, parse_mode=ParseMode.HTML)
+        except TelegramAPIError:
+            pass
+        return
+
+    # Attempt to deliver private dossier to DM
     try:
+        profile = await generate_profile(metrics)
+        card_data = {**metrics, **profile}
         me = await bot.get_me()
-        builder = InlineKeyboardBuilder()
-        builder.button(
-            text="🗂 Открыть досье в ЛС",
-            url=f"https://t.me/{me.username}?start=dossier",
+        buf = await render_dossier(card_data, bot_username=me.username or "VultureBot")
+        buf.seek(0)
+        photo = BufferedInputFile(buf.read(), filename="dossier.png")
+        trend_icon = metrics.get("trend_arrow", "🔺")
+        in_d = metrics.get("in_degree", 0)
+        out_d = metrics.get("out_degree", 0)
+        rank_idx = metrics.get("rank_in_chat", 1)
+
+        dm_caption = (
+            f"🦅 <b>Персональное досье @{html.escape(str(metrics['username']))}</b> — "
+            f"<i>{html.escape(str(profile['rank_title']))}</i>\n\n"
+            f"📊 <b>Динамика:</b> {trend_icon} Ранг в группе: #{rank_idx}\n"
+            f"⚖️ <b>Баланс ответов:</b> входящих [{in_d}] / исходящих [{out_d}]"
         )
-        await message.reply(
-            GROUP_DOSSIER_MESSAGE,
+        await bot.send_photo(
+            chat_id=user_id,
+            photo=photo,
+            caption=dm_caption,
             parse_mode=ParseMode.HTML,
-            reply_markup=builder.as_markup(),
         )
-    except TelegramAPIError:
-        logger.debug("Failed to send dossier redirect in chat %s", chat_id)
+    except Exception:
+        logger.debug("Could not deliver DM dossier to user %s", user_id)
 
-    # Mini-game: «Детектор притяжения»
-    asyncio.create_task(_maybe_start_dossier_game(message, bot, chat_id, user_id, username))
+    # Launch detector mini-game directly in group (only one neat interactive message)
+    await _start_dossier_game(message, bot, chat_id, user_id, username, metrics)
 
 
-async def _maybe_start_dossier_game(
+async def _start_dossier_game(
     message: TgMessage,
     bot: Bot,
     chat_id: int,
     user_id: int,
     username: str,
+    metrics: dict,
 ) -> None:
-    """Trigger the 'Детектор притяжения' mini-game if conditions are met."""
+    """Launch a new active 'Детектор притяжения' mini-game session."""
     try:
-        metrics = await get_user_metrics(chat_id, user_id, days=30)
-        if not metrics:
-            return
-
         top_target = metrics.get("top_targeted_user")
         if not top_target or top_target.startswith("id_"):
             return
@@ -199,22 +229,8 @@ async def _maybe_start_dossier_game(
 
         async with get_session() as session:
             stats = await get_or_create_user_stats(session, chat_id, user_id, username)
-            if stats.last_dossier_game_at:
-                if (now - stats.last_dossier_game_at) < timedelta(hours=2):
-                    return  # 2 hours cooldown
+            stats.last_dossier_game_at = now
 
-            # Check if there is already an active game for this user in chat
-            res_active = await session.execute(
-                select(DossierGame).where(
-                    DossierGame.chat_id == chat_id,
-                    DossierGame.subject_user_id == user_id,
-                    DossierGame.is_active.is_(True),
-                )
-            )
-            if res_active.scalar_one_or_none():
-                return
-
-            # Check total distinct users in chat to adjust threshold (5 or 3)
             res_users_cnt = await session.execute(
                 select(Message.username)
                 .where(Message.chat_id == chat_id, Message.username != "")
@@ -228,13 +244,11 @@ async def _maybe_start_dossier_game(
             threshold = 3 if total_chat_users < 6 else 5
 
             if len(distinct_usernames) < 3:
-                return  # Not enough users to create 4 options
+                return
 
             decoys = random.sample(distinct_usernames, 3)
             options = [top_target] + decoys
             random.shuffle(options)
-
-            stats.last_dossier_game_at = now
 
             game = DossierGame(
                 chat_id=chat_id,
@@ -282,7 +296,7 @@ async def _maybe_start_dossier_game(
                 await session.commit()
 
     except Exception:
-        logger.exception("Failed to start dossier game for user %s in chat %s", user_id, chat_id)
+        logger.exception("Failed to launch dossier game for user %s in chat %s", user_id, chat_id)
 
 
 @router.callback_query(F.data.startswith("dg_vote:"))
@@ -316,7 +330,7 @@ async def _dg_vote_callback(callback: CallbackQuery, bot: Bot) -> None:
 
         if voter_id == game.subject_user_id:
             try:
-                await callback.answer("Вы не можете голосовать в собственном досье!", show_alert=True)
+                await callback.answer(random.choice(SELF_VOTE_QUOTES), show_alert=True)
             except TelegramAPIError:
                 pass
             return
@@ -353,7 +367,6 @@ async def _dg_vote_callback(callback: CallbackQuery, bot: Bot) -> None:
             game.is_active = False
             await session.commit()
 
-            # Award prizes to correct voters
             res_correct = await session.execute(
                 select(DossierGameVote).where(
                     DossierGameVote.game_id == game_id,
@@ -440,16 +453,18 @@ async def _dg_jam_callback(callback: CallbackQuery, bot: Bot) -> None:
         await session.commit()
         subj = game.subject_username
 
+    random_quote = random.choice(JAMMER_ROAST_QUOTES)
     jam_text = (
         f"🛡 <b>[ГЛУШИЛКА АКТИВИРОВАНА]</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Объект @{html.escape(subj)} задействовал систему радиоэлектронного подавления!\n"
         f"Данные о главной связи зашифрованы. Попытка перехвата нейтрализована.\n\n"
-        f"<i>Списан 1 заряд Глушилки (осталось: {remaining}).</i>"
+        f"Списан 1 заряд Глушилки (осталось: {remaining}).\n\n"
+        f"<i>{random_quote}</i>"
     )
 
     try:
-        await callback.message.edit_text(jam_text, parse_mode=ParseMode.HTML)
+        await callback.message.edit_text(jam_text, parse_mode=ParseMode.HTML, reply_markup=None)
     except TelegramAPIError:
         pass
 
@@ -457,92 +472,6 @@ async def _dg_jam_callback(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Глушилка активирована! Данные скрыты.")
     except TelegramAPIError:
         pass
-
-
-@router.message(Command("pulse"), _GROUP_FILTER)
-async def _pulse(message: TgMessage, bot: Bot) -> None:
-    """Post group-anomalies summary (admin-only)."""
-    if message.from_user is None:
-        return
-
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-
-    if not await _is_group_admin(bot, chat_id, user_id):
-        try:
-            await message.reply(ACCESS_DENIED_MESSAGE, parse_mode=ParseMode.HTML)
-        except TelegramAPIError:
-            pass
-        return
-
-    if await _show_calibration_progress(message, chat_id):
-        return
-
-    status_msg = await send_animated_terminal(
-        message,
-        final_text="<code>[SYS] Дешифровка топологии группы... ⏳</code>",
-        operation_name="АНАЛИЗ АНОМАЛИЙ",
-    )
-
-    try:
-        await bot.send_chat_action(chat_id, action="typing")
-    except TelegramAPIError:
-        pass
-
-    anomalies = await get_group_anomalies(chat_id, days=30)
-    if not anomalies or not anomalies.get("top_influencer"):
-        if status_msg:
-            try:
-                await status_msg.edit_text(
-                    "📉 <b>[КАЛИБРОВКА СЕТИ]</b>\n"
-                    "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
-                    "Первые метрики станут доступны по мере активности чата.",
-                    parse_mode=ParseMode.HTML,
-                )
-            except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
-                pass
-        return
-
-    top = anomalies["top_influencer"]
-    ignored = anomalies.get("most_ignored")
-    secret = anomalies.get("secret_dynamic")
-
-    lines = [
-        "🦅 <b>VULTURE PULSE // АНОМАЛИИ ГРУППЫ</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        f"👑 <b>Главный влияющий:</b> @{html.escape(top['username'])} (Оценка: {top['score']:.1f}/10)",
-        "",
-    ]
-    if ignored:
-        lines.append(f"💀 <b>Самый игнорируемый:</b> @{html.escape(ignored['username'])} (Игнор: {ignored['neglected_rate']:.0%})")
-    else:
-        lines.append("💀 <b>Самый игнорируемый:</b> <i>Нет явного выброса</i>")
-    lines.append("")
-
-    if secret:
-        lines.append(f"🔗 <b>Тайная связь:</b> @{html.escape(secret['user_a'])} ↔ @{html.escape(secret['user_b'])}\n   Вес: {secret['combined_weight']:.1f}")
-    else:
-        lines.append("🔗 <b>Тайная связь:</b> <i>Нет выраженной пары</i>")
-    lines.append("")
-
-    lines += [
-        f"📊 <b>Участников:</b> {anomalies['total_users']} | <b>Взаимодействий:</b> {anomalies['total_interactions']}",
-        "",
-        "<i>Используйте /sync реплаем на сообщение, чтобы проверить связь.</i>",
-    ]
-
-    final_text = "\n".join(lines)
-    if status_msg:
-        try:
-            await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
-        except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
-            logger.debug("Unable to update pulse status in chat %s", chat_id)
-    else:
-        try:
-            await message.reply(final_text, parse_mode=ParseMode.HTML)
-        except TelegramAPIError:
-            pass
 
 
 @router.message(Command("top"), _GROUP_FILTER)
@@ -617,12 +546,13 @@ async def _top_help_callback(callback: CallbackQuery) -> None:
     """Show detailed explanation of the ranking calculation."""
     help_text = (
         "📖 <b>КАК РАССЧИТЫВАЕТСЯ РЕЙТИНГ VULTURE</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "• <b>Баллы влияния</b> рассчитываются через алгоритм PageRank по социальному графу общения за последние 30 дней.\n"
-        "• <b>Учитываются только отклики:</b> когда другие участники отвечают на ваши сообщения или ставят реакции. Простой спам без ответов баллов не приносит!\n"
-        "• <b>Стрелки тренда:</b> 🔺 означает, что за последние 24 часа ваш актив превышает среднюю норму за неделю. 🔻 — активность снижается.\n"
-        "• <b>Роли и статусы:</b> вычисляются по уникальным паттернам (Магнит внимания, Связной, Генератор движа и др.).\n"
-        "• <b>Чёрная метка (/brand):</b> победители субботнего Тотализатора (/bets) получают право навесить своё клеймо на любого участника на 72 часа!"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Баллы влияния (0–10):</b> Рассчитываются по алгоритму PageRank за последние 30 дней. "
+        "Учитываются только живые ответы на ваши сообщения и реакции. Простой спам без откликов баллов не приносит!\n\n"
+        "<b>Стрелки тренда (🔺 / 🔻):</b> Показывают динамику: 🔺 — активность за последние 24 часа выше вашей недельной нормы; "
+        "🔻 — активность снижается.\n\n"
+        "<b>Роли и статусы:</b> Уникальные архетипы (Серый кардинал, Магнит внимания, Снайпер и др.) распределяются алгоритмом без повторов.\n\n"
+        "<b>Чёрная метка (/brand):</b> Победители субботнего Тотализатора получают эксклюзивное право лично переписать статус любого участника на 72 часа!"
     )
     try:
         await callback.answer()
@@ -632,7 +562,7 @@ async def _top_help_callback(callback: CallbackQuery) -> None:
 
 
 # ---------------------------------------------------------------------------
-# /sync — with inline keyboard picker and roulette
+# /sync — with inline keyboard picker, roulette and robust photo sending
 # ---------------------------------------------------------------------------
 
 @router.message(Command("sync"), _GROUP_FILTER)
@@ -645,11 +575,9 @@ async def _sync(message: TgMessage, bot: Bot) -> None:
     user_a_id = message.from_user.id
     user_b_id: int | None = None
 
-    # Option 1: Reply to another user's message
     if message.reply_to_message and message.reply_to_message.from_user:
         user_b_id = message.reply_to_message.from_user.id
 
-    # Option 2: /sync @username
     if user_b_id is None:
         parts = message.text.split() if message.text else []
         if len(parts) > 1 and parts[1].startswith("@"):
@@ -665,12 +593,11 @@ async def _sync(message: TgMessage, bot: Bot) -> None:
             except Exception:
                 logger.debug("DB lookup failed for username %s in /sync", raw_tag)
 
-    # Option 3: Without arguments — display picker
     if user_b_id is None or user_b_id == user_a_id:
         await _sync_show_picker(message, chat_id, user_a_id)
         return
 
-    await _sync_run(message, bot, chat_id, user_a_id, user_b_id)
+    await _sync_run(bot, chat_id, user_a_id, user_b_id, trigger_message=message)
 
 
 async def _sync_show_picker(message: TgMessage, chat_id: int, caller_id: int) -> None:
@@ -688,9 +615,8 @@ async def _sync_show_picker(message: TgMessage, chat_id: int, caller_id: int) ->
         try:
             await message.reply(
                 "⚠️ <b>[ОШИБКА МАРШРУТА]</b>\n"
-                "Недостаточно участников для выбора. Ответьте командой "
-                "<code>/sync</code> на сообщение участника или напишите "
-                "<code>/sync @username</code>.",
+                "Недостаточно участников для выбора. Ответьте на сообщение участника командой "
+                "<code>/sync</code> или напишите <code>/sync @username</code>.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramAPIError:
@@ -704,7 +630,7 @@ async def _sync_show_picker(message: TgMessage, chat_id: int, caller_id: int) ->
             text=f"@{uname}",
             callback_data=f"sync:{caller_id}:{u['user_id']}",
         )
-    builder.adjust(2)  # 2 columns = 2×3 grid
+    builder.adjust(2)
     builder.row()
     builder.button(
         text="🎲 Случайный резонанс (Рулетка)",
@@ -716,7 +642,7 @@ async def _sync_show_picker(message: TgMessage, chat_id: int, caller_id: int) ->
             "🔭 <b>[VULTURE // СКАНЕР СВЯЗЕЙ]</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "Выберите участника для анализа парной связи:\n\n"
-            "<i>Или: ответьте /sync на сообщение участника · /sync @username</i>",
+            "<i>Или: ответьте на сообщение участника командой /sync · /sync @username</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=builder.as_markup(),
         )
@@ -735,7 +661,7 @@ async def _sync_callback(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     try:
-        _, caller_id_str, target_id_str = callback.data.split(":")  # type: ignore[union-attr]
+        _, caller_id_str, target_id_str = callback.data.split(":")
         caller_id = int(caller_id_str)
         target_id = int(target_id_str)
     except (ValueError, AttributeError):
@@ -747,10 +673,7 @@ async def _sync_callback(callback: CallbackQuery, bot: Bot) -> None:
 
     if callback.from_user.id != caller_id:
         try:
-            await callback.answer(
-                "Это сканирование запущено другим пользователем.",
-                show_alert=True,
-            )
+            await callback.answer("Это сканирование запущено другим пользователем.", show_alert=True)
         except TelegramAPIError:
             pass
         return
@@ -765,7 +688,7 @@ async def _sync_callback(callback: CallbackQuery, bot: Bot) -> None:
     except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
         pass
 
-    await _sync_run(callback.message, bot, callback.message.chat.id, caller_id, target_id)
+    await _sync_run(bot, callback.message.chat.id, caller_id, target_id)
 
 
 @router.callback_query(F.data.startswith("sync_random:"))
@@ -814,18 +737,20 @@ async def _sync_random_callback(callback: CallbackQuery, bot: Bot) -> None:
     except TelegramAPIError:
         pass
 
-    await _sync_run(callback.message, bot, chat_id, caller_id, chosen_target)
+    await _sync_run(bot, chat_id, caller_id, chosen_target)
 
 
 async def _sync_run(
-    message: TgMessage,
     bot: Bot,
     chat_id: int,
     user_a_id: int,
     user_b_id: int,
+    trigger_message: TgMessage | None = None,
 ) -> None:
-    """Build and send the sync card."""
-    status_msg = await send_card_status(message, card_label="ГЕНЕРАЦИЯ КАРТОЧКИ СВЯЗЕЙ")
+    """Build and send the sync card via BufferedInputFile directly to chat."""
+    status_msg = None
+    if trigger_message:
+        status_msg = await send_card_status(trigger_message, card_label="ГЕНЕРАЦИЯ КАРТОЧКИ СВЯЗЕЙ")
 
     try:
         await bot.send_chat_action(chat_id, "upload_photo")
@@ -839,23 +764,37 @@ async def _sync_run(
             "Недостаточно данных для анализа. Граф формируется в реальном времени.\n"
             "Первые метрики станут доступны по мере активности чата."
         )
-        await safe_delete(status_msg)
+        if status_msg:
+            await safe_delete(status_msg)
         try:
-            await message.reply(calib_text, parse_mode=ParseMode.HTML)
+            await bot.send_message(chat_id, calib_text, parse_mode=ParseMode.HTML)
         except TelegramAPIError:
             pass
         return
 
     me = await bot.get_me()
     buf = await render_sync_card(pair_data, bot_username=me.username or "VultureBot")
-    photo_file = BufferedInputFile(buf.getvalue(), filename="sync_card.png")
+    buf.seek(0)
+    photo_file = BufferedInputFile(buf.read(), filename="sync.png")
 
-    await safe_delete(status_msg)
+    if status_msg:
+        await safe_delete(status_msg)
+
+    caption = (
+        f"🔗 <b>VULTURE // СИНХРОНИЗАЦИЯ УЗЛОВ</b>\n"
+        f"@{html.escape(pair_data['user_a'])} ↔ @{html.escape(pair_data['user_b'])}\n"
+        f"Резонанс: <b>{pair_data.get('sync_percent', 0.0):.1f}%</b> — {html.escape(pair_data.get('verdict', ''))}"
+    )
 
     try:
-        await message.reply_photo(photo_file)
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
     except TelegramAPIError:
-        logger.debug("Failed to send sync card in chat %s", chat_id)
+        logger.exception("Failed to send sync photo in chat %s", chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -890,7 +829,7 @@ async def _brand(message: TgMessage, bot: Bot) -> None:
                 "🏷 <b>[VULTURE // ЧЁРНАЯ МЕТКА]</b>\n\n"
                 "Использование:\n"
                 "• <code>/brand @username Текст статуса</code>\n"
-                "• или реплаем на сообщение: <code>/brand Текст статуса</code>\n\n"
+                "• или ответом на сообщение: <code>/brand Текст статуса</code>\n\n"
                 "<i>Заряды Чёрной метки выдаются только победителям воскресного Тотализатора (/bets).</i>",
                 parse_mode=ParseMode.HTML,
             )
@@ -956,118 +895,180 @@ async def _brand(message: TgMessage, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
-# /bets & Totalizator
+# /bets & Persistent Interactive Totalizator
 # ---------------------------------------------------------------------------
+
+CAT_TITLES = {
+    "top_influencer": "👑 Серый кардинал",
+    "clown_of_the_week": "🤡 Клоун недели",
+    "neglected": "💀 Главный игнор",
+}
+
+
+def _build_nominations_keyboard() -> InlineKeyboardBuilder:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👑 Серый кардинал", callback_data="bet_cat:top_influencer")
+    builder.button(text="🤡 Клоун недели", callback_data="bet_cat:clown_of_the_week")
+    builder.button(text="💀 Главный игнор", callback_data="bet_cat:neglected")
+    builder.adjust(1)
+    return builder
+
 
 @router.message(Command("bets"), _GROUP_FILTER)
 async def _bets(message: TgMessage, bot: Bot) -> None:
-    """Show Totalizator betting prompt."""
-    await send_betting_invitation(bot, message.chat.id)
+    """Show Totalizator betting prompt or closed notification."""
+    chat_id = message.chat.id
 
-
-@router.callback_query(F.data.startswith("bet:"))
-async def _bet_category_callback(callback: CallbackQuery, bot: Bot) -> None:
-    """Prompt user to specify their bet target via ForceReply."""
-    if callback.from_user is None or callback.message is None:
+    if not is_betting_open():
+        closed_text = (
+            "🎰 <b>[ТОТАЛИЗАТОР СУДНОГО ДНЯ // ЗАКРЫТ]</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Окно приёма ставок открывается каждую <b>субботу в 20:00 МСК</b> и закрывается в <b>воскресенье в 20:00 МСК</b>.\n\n"
+            "🏆 <b>Призы для угадавших:</b>\n"
+            "• +1 заряд <b>Глушилки</b> (защита от раскрытия связей)\n"
+            "• +1 заряд <b>Чёрной метки</b> (команда /brand)\n"
+            "• +1.5 балла к рейтингу влияния\n\n"
+            "<i>Возвращайтесь в субботу вечером, чтобы сделать свой прогноз!</i>"
+        )
+        try:
+            await message.reply(closed_text, parse_mode=ParseMode.HTML)
+        except TelegramAPIError:
+            pass
         return
 
+    text = (
+        "🎰 <b>VULTURE // ТОТАЛИЗАТОР СУДНОГО ДНЯ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Угадайте победителей воскресного разбора Судного дня!\n\n"
+        "🏆 <b>Призы для победителей:</b>\n"
+        "• +1 заряд <b>Глушилки</b> (защита от раскрытия связей)\n"
+        "• +1 заряд <b>Чёрной метки</b> (команда /brand)\n"
+        "• +1.5 балла к рейтингу влияния\n\n"
+        "Выберите номинацию для ставки (при повторном выборе ставка перезаписывается):"
+    )
+    builder = _build_nominations_keyboard()
     try:
-        _, category, week_key = callback.data.split(":", 2)
-    except Exception:
-        return
-
-    cat_titles = {
-        "top_influencer": "👑 Серый кардинал (лидер влияния)",
-        "clown_of_the_week": "🤡 Клоун недели (максимум реакций-клоунов)",
-        "neglected": "💀 Главный игнор (максимум сообщений без ответа)",
-    }
-    cat_title = cat_titles.get(category, category)
-
-    try:
-        await callback.answer()
-        reply_prompt = (
-            f"🎰 <b>ТОТАЛИЗАТОР // СТАВКА</b>\n\n"
-            f"Номинация: <b>{cat_title}</b>\n\n"
-            f"Ответьте на это сообщение никнеймом участника (в формате <code>@username</code>), на которого ставите:\n"
-            f"<i>[bet:{category}:{week_key}]</i>"
-        )
-        await callback.message.reply(
-            reply_prompt,
-            parse_mode=ParseMode.HTML,
-            reply_markup=ForceReply(selective=True),
-        )
+        await message.reply(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
     except TelegramAPIError:
         pass
 
 
-async def _check_and_handle_bet_reply(message: TgMessage) -> bool:
-    """Check if message is a reply to a betting ForceReply. Returns True if handled."""
-    if not message.reply_to_message or not message.reply_to_message.text:
-        return False
-    reply_text = message.reply_to_message.text
-    if "[bet:" not in reply_text:
-        return False
-
+@router.callback_query(F.data == "bet_back")
+async def _bet_back_callback(callback: CallbackQuery) -> None:
+    """Return to main nominations menu."""
+    text = (
+        "🎰 <b>VULTURE // ТОТАЛИЗАТОР СУДНОГО ДНЯ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Выберите номинацию для ставки (при повторном выборе ставка перезаписывается):"
+    )
+    builder = _build_nominations_keyboard()
     try:
-        bet_tag = reply_text.split("[bet:")[1].split("]")[0]
-        category, week_key = bet_tag.split(":", 1)
-    except Exception:
-        return False
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+        await callback.answer()
+    except TelegramAPIError:
+        pass
 
-    raw_val = (message.text or "").strip()
-    target_username = raw_val.lstrip("@").split()[0] if raw_val else ""
-    if not target_username:
+
+@router.callback_query(F.data.startswith("bet_cat:"))
+async def _bet_cat_callback(callback: CallbackQuery) -> None:
+    """Show top candidates for the chosen nomination."""
+    if callback.from_user is None or callback.message is None:
+        return
+
+    category = callback.data.split(":", 1)[1]
+    cat_name = CAT_TITLES.get(category, category)
+    chat_id = callback.message.chat.id
+
+    top_candidates = await get_top_active_users(chat_id, exclude_user_id=0, limit=6, days=7)
+    if not top_candidates:
         try:
-            await message.reply("⚠️ Укажите никнейм в формате @username.")
+            await callback.answer("Недостаточно участников в базе для ставок.", show_alert=True)
         except TelegramAPIError:
             pass
-        return True
+        return
 
-    cat_titles = {
-        "top_influencer": "Серый кардинал",
-        "clown_of_the_week": "Клоун недели",
-        "neglected": "Главный игнор",
-    }
-    cat_name = cat_titles.get(category, category)
-    chat_id = message.chat.id
-    voter_id = message.from_user.id  # type: ignore[union-attr]
-    voter_username = _resolve_username(message.from_user)
+    builder = InlineKeyboardBuilder()
+    for u in top_candidates:
+        uname = u["username"]
+        builder.button(text=f"@{uname}", callback_data=f"bet_pick:{category}:{uname}")
+    builder.adjust(2)
+    builder.row()
+    builder.button(text="⬅️ Назад к номинациям", callback_data="bet_back")
+
+    text = (
+        f"🎰 <b>ТОТАЛИЗАТОР // ВЫБОР КАНДИДАТА</b>\n"
+        f"Номинация: <b>{cat_name}</b>\n\n"
+        f"Выберите участника из топа активности чата:\n"
+        f"<i>(При повторном клике старая ставка будет перезаписана)</i>"
+    )
 
     try:
-        async with get_session() as session:
-            res = await session.execute(
-                select(PurgeBet).where(
-                    PurgeBet.chat_id == chat_id,
-                    PurgeBet.voter_id == voter_id,
-                    PurgeBet.category == category,
-                    PurgeBet.week_key == week_key,
-                )
-            )
-            existing = res.scalar_one_or_none()
-            if existing:
-                existing.target_username = target_username
-            else:
-                bet = PurgeBet(
-                    chat_id=chat_id,
-                    voter_id=voter_id,
-                    voter_username=voter_username,
-                    category=category,
-                    target_username=target_username,
-                    week_key=week_key,
-                )
-                session.add(bet)
-            await session.commit()
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+        await callback.answer()
+    except TelegramAPIError:
+        pass
 
-        await message.reply(
-            f"✅ <b>Ставка принята!</b>\n\n"
-            f"Вы поставили на <b>@{html.escape(target_username)}</b> в номинации «{cat_name}».\n"
-            f"Итоги подведём в воскресенье в 20:00 МСК!",
-            parse_mode=ParseMode.HTML,
-        )
-        return True
+
+@router.callback_query(F.data.startswith("bet_pick:"))
+async def _bet_pick_callback(callback: CallbackQuery) -> None:
+    """Save or overwrite a user's bet."""
+    if callback.from_user is None or callback.message is None:
+        return
+
+    try:
+        _, category, target_username = callback.data.split(":", 2)
     except Exception:
-        logger.exception("Failed to save bet in chat %s", chat_id)
-        return False
+        return
+
+    chat_id = callback.message.chat.id
+    voter_id = callback.from_user.id
+    voter_username = _resolve_username(callback.from_user)
+    week_key = datetime.now(timezone.utc).strftime("%Y-W%W")
+    cat_name = CAT_TITLES.get(category, category)
+
+    async with get_session() as session:
+        res = await session.execute(
+            select(PurgeBet).where(
+                PurgeBet.chat_id == chat_id,
+                PurgeBet.voter_id == voter_id,
+                PurgeBet.category == category,
+                PurgeBet.week_key == week_key,
+            )
+        )
+        existing = res.scalar_one_or_none()
+        if existing:
+            existing.target_username = target_username
+        else:
+            bet = PurgeBet(
+                chat_id=chat_id,
+                voter_id=voter_id,
+                voter_username=voter_username,
+                category=category,
+                target_username=target_username,
+                week_key=week_key,
+            )
+            session.add(bet)
+        await session.commit()
+
+    try:
+        await callback.answer("🎯 Ваша ставка в этой номинации успешно сохранена!", show_alert=True)
+    except TelegramAPIError:
+        pass
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Выбрать другую номинацию", callback_data="bet_back")
+
+    confirmation_text = (
+        f"🎯 <b>Ваша ставка в этой номинации успешно сохранена!</b>\n\n"
+        f"Номинация: <b>{cat_name}</b>\n"
+        f"Ваш выбор: <b>@{html.escape(target_username)}</b>\n\n"
+        f"<i>Вы можете изменить свой выбор в любой момент до воскресенья 20:00 МСК.</i>"
+    )
+
+    try:
+        await callback.message.edit_text(confirmation_text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+    except TelegramAPIError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1124,10 +1125,6 @@ async def _log_text_message(message: TgMessage, bot: Bot) -> None:
     if message.text and message.text.startswith("/"):
         return
     if message.from_user is None:
-        return
-
-    # Check if this text message is a reply to Totalizator ForceReply
-    if await _check_and_handle_bet_reply(message):
         return
 
     has_reply = bool(
