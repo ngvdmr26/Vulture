@@ -256,22 +256,29 @@ def _render_dossier_sync(
 
     # Метрика 1: Индекс влияния
     inf_score = float(profile_data.get("influence_score", 0.0))
-    draw.text((68, 222), "ИНДЕКС ВЛИЯНИЯ (PAGERANK)", fill=COLOR_TEXT_DIM, font=f_metric_label)
-    draw.text((68, 240), f"{inf_score:.1f} / 10.0", fill=COLOR_WHITE, font=f_metric_value)
-    _draw_segmented_bar(draw, 68, 276, 375, 8, ratio=inf_score / 10.0, segments=18, active_color=COLOR_NEON)
+    rank_val = profile_data.get("rank_in_chat") or 1
+    trend_arrow = profile_data.get("trend_arrow", "▲")
+    trend_word = "РАСТУЩИЙ АКТИВ" if trend_arrow in ("▲", "🔺") else "СПАД АКТИВА"
+    rank_trend_text = f"#{rank_val} В ИЕРАРХИИ | {trend_arrow} {trend_word}"
+
+    draw.text((68, 216), "ИНДЕКС ВЛИЯНИЯ (PAGERANK)", fill=COLOR_TEXT_DIM, font=f_metric_label)
+    draw.text((68, 234), f"{inf_score:.1f} / 10.0", fill=COLOR_WHITE, font=f_metric_value)
+    draw.text((230, 244), rank_trend_text, fill=COLOR_CYAN, font=f_tag)
+    _draw_segmented_bar(draw, 68, 268, 375, 8, ratio=inf_score / 10.0, segments=18, active_color=COLOR_NEON)
+    draw.text((68, 282), "Частота, с которой чат отвечает и реагирует на твои реплики", fill=COLOR_TEXT_DIM, font=f_tag)
 
     # Метрика 2: Синхронизация / Зависимость
     neg_rate = float(profile_data.get("neglected_rate", 0.0))
     dep_rate = max(0.0, min(1.0, 1.0 - neg_rate)) * 100.0
     draw.text((68, 304), "ИНДЕКС ВЗАИМНОСТИ И СИНХРОНИЗАЦИИ", fill=COLOR_TEXT_DIM, font=f_metric_label)
     draw.text((68, 322), f"{dep_rate:.0f}%", fill=COLOR_WHITE, font=f_metric_value)
-    _draw_segmented_bar(draw, 68, 358, 375, 8, ratio=dep_rate / 100.0, segments=18, active_color=COLOR_GOLD)
+    _draw_segmented_bar(draw, 68, 354, 375, 8, ratio=dep_rate / 100.0, segments=18, active_color=COLOR_GOLD)
 
     # Метрика 3: Главная связь
     top_target = profile_data.get("top_targeted_user")
     target_text = f"@{top_target}" if top_target else "НЕТ [ИЗОЛЯЦИЯ]"
-    draw.text((68, 386), "ГЛАВНАЯ ЦЕЛЬ ГРАВИТАЦИИ", fill=COLOR_TEXT_DIM, font=f_metric_label)
-    draw.text((68, 404), target_text, fill=COLOR_CYAN, font=f_username)
+    draw.text((68, 376), "ГЛАВНАЯ ЦЕЛЬ ГРАВИТАЦИИ", fill=COLOR_TEXT_DIM, font=f_metric_label)
+    draw.text((68, 394), target_text, fill=COLOR_CYAN, font=f_username)
 
     # Метрика 4: Социальная гравитация (Перевод статуса)
     raw_grav = str(profile_data.get("gravity_label", "BALANCED")).upper()
@@ -285,14 +292,24 @@ def _render_dossier_sync(
         grav_label = "СБАЛАНСИРОВАННЫЙ"
         grav_color = COLOR_WHITE
 
-    draw.text((68, 452), "ОРБИТАЛЬНЫЙ СТАТУС В ГРУППЕ", fill=COLOR_TEXT_DIM, font=f_metric_label)
-    draw.text((68, 470), grav_label, fill=grav_color, font=f_header)
+    draw.text((68, 436), "ОРБИТАЛЬНЫЙ СТАТУС В ГРУППЕ", fill=COLOR_TEXT_DIM, font=f_metric_label)
+    draw.text((68, 454), grav_label, fill=grav_color, font=f_header)
 
     # Входящие / Исходящие
     in_d = profile_data.get("in_degree", 0)
     out_d = profile_data.get("out_degree", 0)
-    draw.line([(68, 515), (460, 515)], fill=COLOR_BORDER, width=1)
-    draw.text((68, 532), f"БАЛАНС: ВХОДЯЩИЕ [{in_d}]  /  ИСХОДЯЩИЕ [{out_d}]", fill=COLOR_TEXT_DIM, font=f_tag)
+    if in_d > out_d:
+        balance_mode = "МАГНИТ"
+        b_color = COLOR_NEON
+    elif out_d > in_d:
+        balance_mode = "ИНИЦИАТОР"
+        b_color = COLOR_GOLD
+    else:
+        balance_mode = "БАЛАНС"
+        b_color = COLOR_WHITE
+
+    draw.line([(68, 495), (460, 495)], fill=COLOR_BORDER, width=1)
+    draw.text((68, 510), f"БАЛАНС: {balance_mode} | ВХ: [{in_d}] / ИСХ: [{out_d}]", fill=b_color, font=f_tag)
 
     # -----------------------------------------------------------------------
     # Правая матрица: Психологический диагноз
@@ -386,15 +403,39 @@ def _render_sync_card_sync(pair_data: dict, bot_username: str = "VultureBot") ->
     _draw_segmented_bar(draw, 70, 255, 1010, 14, ratio=sync_pct / 100.0, segments=32, active_color=COLOR_NEON)
 
     # Баланс сил (A -> B vs B -> A)
+    w_ab = float(pair_data.get("weight_a_to_b", 0.0))
+    w_ba = float(pair_data.get("weight_b_to_a", 0.0))
+
+    if w_ab == 0 and w_ba == 0:
+        status_a = "ПОЛНЫЙ ВАКУУМ"
+        color_a = COLOR_TEXT_DIM
+        status_b = "ПОЛНЫЙ ВАКУУМ"
+        color_b = COLOR_TEXT_DIM
+    elif abs(w_ab - w_ba) <= 0.25 * max(w_ab, w_ba) and min(w_ab, w_ba) > 0:
+        status_a = "⚡️ ИДЕАЛЬНЫЙ РЕЗОНАНС"
+        color_a = COLOR_NEON
+        status_b = "⚡️ ИДЕАЛЬНЫЙ РЕЗОНАНС"
+        color_b = COLOR_NEON
+    elif w_ab > w_ba:
+        status_a = "🔥 ИНИЦИАТОР СВЯЗИ"
+        color_a = COLOR_GOLD
+        status_b = "🧊 ПРИНИМАЮЩАЯ СТОРОНА"
+        color_b = COLOR_CYAN
+    else:
+        status_a = "🧊 ПРИНИМАЮЩАЯ СТОРОНА"
+        color_a = COLOR_CYAN
+        status_b = "🔥 ИНИЦИАТОР СВЯЗИ"
+        color_b = COLOR_GOLD
+
     draw.rectangle([(50, 330), (585, 490)], fill=COLOR_PANEL_BG, outline=COLOR_BORDER, width=1)
     draw.text((70, 348), f"ИМПУЛЬС: @{user_a}  ➔  @{user_b}", fill=COLOR_TEXT_DIM, font=f_tag)
-    draw.text((70, 380), f"{pair_data['weight_a_to_b']}", fill=COLOR_CYAN, font=f_val)
-    draw.text((70, 435), "Вес направленных ответов и реакций", fill=COLOR_TEXT_DIM, font=f_body)
+    draw.text((70, 380), f"{w_ab:.1f}", fill=COLOR_CYAN, font=f_val)
+    draw.text((70, 435), status_a, fill=color_a, font=f_header)
 
     draw.rectangle([(615, 330), (1150, 490)], fill=COLOR_PANEL_BG, outline=COLOR_BORDER, width=1)
     draw.text((635, 348), f"ИМПУЛЬС: @{user_b}  ➔  @{user_a}", fill=COLOR_TEXT_DIM, font=f_tag)
-    draw.text((635, 380), f"{pair_data['weight_b_to_a']}", fill=COLOR_GOLD, font=f_val)
-    draw.text((635, 435), "Вес встречных импульсов", fill=COLOR_TEXT_DIM, font=f_body)
+    draw.text((635, 380), f"{w_ba:.1f}", fill=COLOR_GOLD, font=f_val)
+    draw.text((635, 435), status_b, fill=color_b, font=f_header)
 
     # Диагноз пары
     draw.rectangle([(50, 510), (1150, 595)], fill=COLOR_PANEL_ALT, outline=COLOR_BORDER, width=1)

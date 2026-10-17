@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import networkx as nx
 from sqlalchemy import select
 
-from database import Message, Reaction, get_session
+from database import Message, Reaction, UserGroupStats, get_session
 
 logger = logging.getLogger(__name__)
 
@@ -461,10 +461,39 @@ async def get_user_metrics(chat_id: int, user_id: int, days: int = 30) -> dict |
         out_d = user_gd["out_degree"]
         neglected_rate = (1.0 - reciprocated / out_d) if out_d > 0 else 0.0
 
+        # Rank in chat
+        ranked_uids = [u for u, _ in sorted(influence.items(), key=lambda x: x[1], reverse=True)]
+        rank_in_chat = (ranked_uids.index(user_id) + 1) if user_id in ranked_uids else 1
+
+        # Trend calculation (24h vs 7d average)
+        trend_arrow = "🔺"
+        try:
+            from sqlalchemy import func
+            now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+            cutoff_day = now_dt - timedelta(days=1)
+            cutoff_week = now_dt - timedelta(days=7)
+            async with get_session() as session:
+                res_d = await session.execute(
+                    select(func.count(Message.message_id))
+                    .where(Message.chat_id == chat_id, Message.user_id == user_id, Message.timestamp >= cutoff_day)
+                )
+                cnt_day = res_d.scalar_one() or 0
+                res_w = await session.execute(
+                    select(func.count(Message.message_id))
+                    .where(Message.chat_id == chat_id, Message.user_id == user_id, Message.timestamp >= cutoff_week)
+                )
+                cnt_week = res_w.scalar_one() or 0
+            week_daily_avg = cnt_week / 7.0 if cnt_week > 0 else 0.0
+            trend_arrow = "🔺" if cnt_day > week_daily_avg * 1.3 else "🔻"
+        except Exception:
+            pass
+
         return {
             "username": user_map.get(user_id, f"id_{user_id}"),
             "user_id": user_id,
             "influence_score": round(user_inf, 2),
+            "rank_in_chat": rank_in_chat,
+            "trend_arrow": trend_arrow,
             "top_targeted_user": top_target,
             "neglected_rate": round(neglected_rate, 3),
             "in_degree": user_gd["in_degree"],
@@ -474,3 +503,330 @@ async def get_user_metrics(chat_id: int, user_id: int, days: int = 30) -> dict |
     except Exception:
         logger.exception("Failed to compute user metrics for user %s in chat %s", user_id, chat_id)
         return None
+
+
+async def get_leaderboard_with_archetypes(
+    chat_id: int,
+    limit: int = 10,
+    days: int = 30,
+) -> list[dict]:
+    """Extended leaderboard with archetype roles, bonus influence, and trend arrows."""
+    from sqlalchemy import func
+
+    try:
+        graph, user_map = await build_social_graph(chat_id, days)
+        if graph.number_of_edges() < _MIN_INTERACTIONS:
+            return []
+
+        influence = await compute_influence(graph)
+        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+        cutoff_day = now_dt - timedelta(days=1)
+        cutoff_week = now_dt - timedelta(days=7)
+        cutoff_30d = now_dt - timedelta(days=days)
+
+        day_counts: dict[int, int] = {}
+        week_counts: dict[int, int] = {}
+        msg_counts_30d: dict[int, int] = {}
+        rxn_counts_30d: dict[int, int] = {}
+        bonus_rows: dict[int, UserGroupStats] = {}
+
+        try:
+            async with get_session() as session:
+                res_day = await session.execute(
+                    select(Message.user_id, func.count(Message.message_id).label("cnt"))
+                    .where(Message.chat_id == chat_id, Message.timestamp >= cutoff_day)
+                    .group_by(Message.user_id)
+                )
+                day_counts = {r.user_id: r.cnt for r in res_day.all()}
+
+                res_week = await session.execute(
+                    select(Message.user_id, func.count(Message.message_id).label("cnt"))
+                    .where(Message.chat_id == chat_id, Message.timestamp >= cutoff_week)
+                    .group_by(Message.user_id)
+                )
+                week_counts = {r.user_id: r.cnt for r in res_week.all()}
+
+                res_msgs = await session.execute(
+                    select(Message.user_id, func.count(Message.message_id).label("cnt"))
+                    .where(Message.chat_id == chat_id, Message.timestamp >= cutoff_30d)
+                    .group_by(Message.user_id)
+                )
+                msg_counts_30d = {r.user_id: r.cnt for r in res_msgs.all()}
+
+                res_rxns = await session.execute(
+                    select(Reaction.target_user_id, func.count(Reaction.id).label("cnt"))
+                    .where(Reaction.chat_id == chat_id, Reaction.timestamp >= cutoff_30d)
+                    .group_by(Reaction.target_user_id)
+                )
+                rxn_counts_30d = {r.target_user_id: r.cnt for r in res_rxns.all()}
+
+                res_bonus = await session.execute(
+                    select(UserGroupStats)
+                    .where(UserGroupStats.chat_id == chat_id)
+                )
+                bonus_rows = {r.user_id: r for r in res_bonus.scalars().all()}
+        except Exception:
+            logger.exception("Failed to load bonus data for archetype leaderboard in chat %s", chat_id)
+
+        candidate_entries = []
+        for uid, base_score in influence.items():
+            bonus_row = bonus_rows.get(uid)
+            bonus_inf = float(bonus_row.bonus_influence) if (bonus_row and bonus_row.bonus_influence) else 0.0
+
+            custom_status = None
+            custom_status_by = None
+            custom_status_until = None
+            if bonus_row and bonus_row.custom_status and bonus_row.custom_status_until:
+                if bonus_row.custom_status_until > now_dt:
+                    custom_status = bonus_row.custom_status
+                    custom_status_by = bonus_row.custom_status_by
+                    custom_status_until = bonus_row.custom_status_until
+
+            final_score = round(base_score + bonus_inf, 1)
+
+            day_c = day_counts.get(uid, 0)
+            week_c = week_counts.get(uid, 0)
+            week_daily_avg = week_c / 7.0 if week_c > 0 else 0.0
+            trend_arrow = "🔺" if day_c > week_daily_avg * 1.3 else "🔻"
+
+            candidate_entries.append({
+                "user_id": uid,
+                "username": user_map.get(uid, f"id_{uid}"),
+                "base_score": round(base_score, 1),
+                "bonus_influence": bonus_inf,
+                "final_score": final_score,
+                "trend_arrow": trend_arrow,
+                "custom_status": custom_status,
+                "custom_status_by": custom_status_by,
+                "custom_status_until": custom_status_until,
+                "msg_count": msg_counts_30d.get(uid, 0),
+                "rxn_count": rxn_counts_30d.get(uid, 0),
+            })
+
+        ranked_entries = sorted(candidate_entries, key=lambda x: x["final_score"], reverse=True)[:limit]
+
+        board = _assign_archetypes(ranked_entries, graph, user_map)
+
+        for i, entry in enumerate(board):
+            entry["rank"] = i + 1
+
+        return board
+    except Exception:
+        logger.exception("Failed to build archetype leaderboard for chat %s", chat_id)
+        return []
+
+
+def _assign_archetypes(board: list[dict], graph: nx.DiGraph, user_map: dict[int, str]) -> list[dict]:
+    """Assign unique archetype roles according to graph metrics and custom statuses."""
+    if not board:
+        return board
+
+    assigned_roles: set[str] = set()
+
+    # Precalculate per-user metrics
+    in_w: dict[int, float] = {}
+    out_w: dict[int, float] = {}
+    unique_neighbors: dict[int, int] = {}
+    top_target_ratio: dict[int, tuple[str, float]] = {}
+
+    for entry in board:
+        uid = entry["user_id"]
+        if uid not in graph:
+            continue
+        in_w[uid] = sum(d.get("weight", 1) for _, _, d in graph.in_edges(uid, data=True))
+        out_w[uid] = sum(d.get("weight", 1) for _, _, d in graph.out_edges(uid, data=True))
+        successors = list(graph.successors(uid))
+        predecessors = list(graph.predecessors(uid))
+        unique_neighbors[uid] = len(set(successors) | set(predecessors))
+
+        if successors and out_w.get(uid, 0) > 0:
+            top_target_uid = max(successors, key=lambda t: graph[uid][t].get("weight", 0))
+            top_w = graph[uid][top_target_uid].get("weight", 0)
+            ratio = top_w / out_w[uid]
+            top_target_ratio[uid] = (user_map.get(top_target_uid, f"id_{top_target_uid}"), ratio)
+
+    # Find highest metrics among board entries for assignment
+    best_magnet_uid = None
+    best_magnet_val = -1.0
+    best_generator_uid = None
+    best_generator_val = -1
+    best_sniper_uid = None
+    best_sniper_val = -1.0
+    best_connector_uid = None
+    best_connector_val = -1
+
+    for entry in board:
+        uid = entry["user_id"]
+        msg_c = entry.get("msg_count", 0)
+        rxn_c = entry.get("rxn_count", 0)
+        in_deg = in_w.get(uid, 0.0)
+
+        # Magnet: in_replies / messages
+        if msg_c > 0:
+            mag_val = in_deg / msg_c
+            if mag_val > best_magnet_val:
+                best_magnet_val = mag_val
+                best_magnet_uid = uid
+
+        # Generator: total messages
+        if msg_c > best_generator_val:
+            best_generator_val = msg_c
+            best_generator_uid = uid
+
+        # Sniper: reactions / messages
+        if msg_c > 0:
+            snip_val = rxn_c / msg_c
+            if snip_val > best_sniper_val:
+                best_sniper_val = snip_val
+                best_sniper_uid = uid
+
+        # Connector: unique neighbors
+        conn_val = unique_neighbors.get(uid, 0)
+        if conn_val > best_connector_val:
+            best_connector_val = conn_val
+            best_connector_uid = uid
+
+    reserve_archetypes = [
+        ("gold_standard", "⚖️ Золотой стандарт — отвечает другим ровно столько же, сколько отвечают ему"),
+        ("backbone", "🛡 Опора режима — стабильный участник основного костяка"),
+        ("provocateur", "🔥 Провокатор — его реплики вызывают самые бурные споры"),
+    ]
+
+    for i, entry in enumerate(board):
+        uid = entry["user_id"]
+
+        # 1. Branded custom status
+        if entry.get("custom_status"):
+            entry["archetype_label"] = (
+                f"🏷 Статус: «{entry['custom_status']}» "
+                f"(Клеймо от @{entry['custom_status_by'] or 'анонима'})"
+            )
+            continue
+
+        # 2. Rank #1 influencer: Серый кардинал
+        if i == 0 and "grey_cardinal" not in assigned_roles:
+            entry["archetype_label"] = "👑 Серый кардинал — его сообщения вызывают максимум ответов в чате"
+            assigned_roles.add("grey_cardinal")
+            continue
+
+        # 3. Magnet: Магнит внимания
+        if uid == best_magnet_uid and best_magnet_val > 1.2 and "magnet" not in assigned_roles:
+            entry["archetype_label"] = "🧲 Магнит внимания — пишет редко, но каждое слово собирает обсуждение"
+            assigned_roles.add("magnet")
+            continue
+
+        # 4. Shadow: Тень @target (>45% replies to one user)
+        if uid in top_target_ratio:
+            target_name, t_ratio = top_target_ratio[uid]
+            shadow_role_key = f"shadow_{uid}"
+            if t_ratio > 0.45 and shadow_role_key not in assigned_roles:
+                entry["archetype_label"] = f"🔗 Тень @{target_name} — больше половины его ответов адресованы одному человеку"
+                assigned_roles.add(shadow_role_key)
+                continue
+
+        # 5. Connector: Связной
+        if uid == best_connector_uid and best_connector_val >= 3 and "connector" not in assigned_roles:
+            entry["archetype_label"] = "🕸 Связной — общается с самым большим числом разных людей"
+            assigned_roles.add("connector")
+            continue
+
+        # 6. Generator: Генератор движа
+        if uid == best_generator_uid and best_generator_val >= 10 and "generator" not in assigned_roles:
+            entry["archetype_label"] = "⚡ Генератор движа — главный мотор чата, запускает больше всего диалогов"
+            assigned_roles.add("generator")
+            continue
+
+        # 7. Sniper: Снайпер
+        if uid == best_sniper_uid and best_sniper_val > 0.5 and "sniper" not in assigned_roles:
+            entry["archetype_label"] = "🎯 Снайпер — мастер метких фраз, собирает максимум реакций"
+            assigned_roles.add("sniper")
+            continue
+
+        # 8. Reserve: Золотой стандарт / Опора режима
+        for r_key, r_label in reserve_archetypes:
+            if r_key not in assigned_roles:
+                entry["archetype_label"] = r_label
+                assigned_roles.add(r_key)
+                break
+        else:
+            entry.setdefault("archetype_label", "🛡 Опора режима — стабильный участник основного костяка")
+
+    return board
+
+
+async def get_interception_data(chat_id: int, window_minutes: int = 15) -> dict:
+    """Fast analytics for event interceptions."""
+    from sqlalchemy import func
+
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=window_minutes)
+
+    result: dict = {
+        "message_count_15m": 0,
+        "top3_uids": [],
+        "hot_pairs": [],
+        "silent_victims": [],
+    }
+
+    try:
+        async with get_session() as session:
+            res_cnt = await session.execute(
+                select(func.count(Message.message_id))
+                .where(Message.chat_id == chat_id, Message.timestamp >= cutoff)
+            )
+            result["message_count_15m"] = res_cnt.scalar_one() or 0
+
+            if result["message_count_15m"] < 12:
+                return result
+
+            # Hot pairs: >= 10 replies between two people in 15 mins
+            res_pairs = await session.execute(
+                select(
+                    Message.user_id,
+                    Message.reply_to_user_id,
+                    func.count(Message.message_id).label("cnt"),
+                )
+                .where(
+                    Message.chat_id == chat_id,
+                    Message.timestamp >= cutoff,
+                    Message.reply_to_user_id.is_not(None),
+                )
+                .group_by(Message.user_id, Message.reply_to_user_id)
+                .having(func.count(Message.message_id) >= 10)
+            )
+            for r in res_pairs.all():
+                result["hot_pairs"].append((r.user_id, r.reply_to_user_id, r.cnt))
+
+            # Silent victims: >= 5 messages from user, 0 replies received in 15 mins
+            res_senders = await session.execute(
+                select(Message.user_id, func.count(Message.message_id).label("cnt"))
+                .where(Message.chat_id == chat_id, Message.timestamp >= cutoff)
+                .group_by(Message.user_id)
+                .having(func.count(Message.message_id) >= 5)
+            )
+            sender_ids = {r.user_id: r.cnt for r in res_senders.all()}
+
+            if sender_ids:
+                res_replied = await session.execute(
+                    select(Message.reply_to_user_id)
+                    .where(
+                        Message.chat_id == chat_id,
+                        Message.timestamp >= cutoff,
+                        Message.reply_to_user_id.in_(list(sender_ids.keys())),
+                    )
+                )
+                replied_uids = set(res_replied.scalars().all())
+                result["silent_victims"] = [uid for uid in sender_ids if uid not in replied_uids]
+    except Exception:
+        logger.exception("get_interception_data failed for chat %s", chat_id)
+
+    try:
+        graph, _ = await build_social_graph(chat_id, days=7)
+        if graph.number_of_edges() >= _MIN_INTERACTIONS:
+            inf = await compute_influence(graph)
+            result["top3_uids"] = [
+                uid for uid, _ in sorted(inf.items(), key=lambda x: x[1], reverse=True)[:3]
+            ]
+    except Exception:
+        logger.exception("build_social_graph failed in get_interception_data for chat %s", chat_id)
+
+    return result

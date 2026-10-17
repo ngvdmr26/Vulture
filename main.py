@@ -64,6 +64,8 @@ async def main() -> None:
         BotCommand(command="sync", description="Анализ связи двух участников"),
         BotCommand(command="pulse", description="Сводка аномалий (админы)"),
         BotCommand(command="dossier", description="Персональное досье"),
+        BotCommand(command="brand", description="Навесить статус на участника (Чёрная метка)"),
+        BotCommand(command="bets", description="Тотализатор Судного дня"),
         BotCommand(command="feedback", description="Связь с разработчиком (баги, идеи)"),
     ])
 

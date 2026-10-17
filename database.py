@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    select,
+    text,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -19,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 # ---------------------------------------------------------------------------
 # ORM Base
@@ -73,6 +85,76 @@ class Reaction(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class UserGroupStats(Base):
+    """Stores charges, buffs, and branded statuses per user per group."""
+    __tablename__ = "user_group_stats"
+    __table_args__ = (
+        Index("ix_user_group_stats_chat_user", "chat_id", "user_id", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    jammer_charges: Mapped[int] = mapped_column(Integer, default=1)
+    last_jammer_refill: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    brand_charges: Mapped[int] = mapped_column(Integer, default=0)
+    custom_status: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    custom_status_by: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    custom_status_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    bonus_influence: Mapped[float] = mapped_column(Float, default=0.0)
+    correct_guesses_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_dossier_game_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+
+
+class PurgeBet(Base):
+    """Totalizator bets on weekly Purge Day outcomes."""
+    __tablename__ = "purge_bets"
+    __table_args__ = (
+        Index("ix_purge_bets_chat_week", "chat_id", "week_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    voter_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    voter_username: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    category: Mapped[str] = mapped_column(String(64))  # 'top_influencer', 'clown_of_the_week', 'neglected'
+    target_username: Mapped[str] = mapped_column(String(255))
+    week_key: Mapped[str] = mapped_column(String(20), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class DossierGame(Base):
+    """Active public dossier detector game session in a group."""
+    __tablename__ = "dossier_games"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    subject_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    subject_username: Mapped[str] = mapped_column(String(255))
+    correct_answer: Mapped[str] = mapped_column(String(255))
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    vote_count: Mapped[int] = mapped_column(Integer, default=0)
+    threshold: Mapped[int] = mapped_column(Integer, default=5)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class DossierGameVote(Base):
+    """Votes cast in a dossier detector game."""
+    __tablename__ = "dossier_game_votes"
+    __table_args__ = (
+        Index("ix_dgv_game_voter", "game_id", "voter_id", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    game_id: Mapped[int] = mapped_column(Integer, ForeignKey("dossier_games.id"), index=True)
+    voter_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    voted_for: Mapped[str] = mapped_column(String(255))
+    is_correct: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 # ---------------------------------------------------------------------------
 # Engine & session factory (module-level singletons)
 # ---------------------------------------------------------------------------
@@ -106,26 +188,62 @@ async def init_db(url: str | None = None) -> None:
         if "sqlite" in url:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
-            # Migrate: add is_initialized if it doesn't exist yet (safe for existing DBs)
-            try:
-                await conn.execute(
-                    text("ALTER TABLE groups ADD COLUMN is_initialized BOOLEAN NOT NULL DEFAULT 0")
-                )
-                logger.info("Migration: added is_initialized column to groups table")
-            except Exception:
-                pass  # Column already exists — silently ignore
+            # Safe column migrations for existing databases
+            migrations = [
+                "ALTER TABLE groups ADD COLUMN is_initialized BOOLEAN NOT NULL DEFAULT 0",
+            ]
+            for sql in migrations:
+                try:
+                    await conn.execute(text(sql))
+                    logger.info("Migration applied: %s", sql[:60])
+                except Exception:
+                    pass  # Column already exists
 
     logger.info("Database initialised – tables ready (%s)", url.split("://")[0])
 
 
 def get_session() -> AsyncSession:
-    """Return a fresh :class:`AsyncSession` from the factory.
-
-    Usage::
-
-        async with get_session() as session:
-            ...
-    """
+    """Return a fresh :class:`AsyncSession` from the factory."""
     if _session_factory is None:
         raise RuntimeError("Database not initialised – call init_db() first")
     return _session_factory()
+
+
+async def get_or_create_user_stats(
+    session: AsyncSession,
+    chat_id: int,
+    user_id: int,
+    username: str | None = None,
+) -> UserGroupStats:
+    """Retrieve or create a UserGroupStats record and handle daily jammer auto-refill."""
+    res = await session.execute(
+        select(UserGroupStats).where(
+            UserGroupStats.chat_id == chat_id,
+            UserGroupStats.user_id == user_id,
+        )
+    )
+    stats = res.scalar_one_or_none()
+    now = _utcnow()
+
+    if stats is None:
+        stats = UserGroupStats(
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            jammer_charges=1,
+            last_jammer_refill=now,
+        )
+        session.add(stats)
+        await session.flush()
+        return stats
+
+    if username and stats.username != username:
+        stats.username = username
+
+    # Auto-refill jammer up to 1 free charge every 24 hours
+    if (stats.jammer_charges or 0) < 1:
+        if stats.last_jammer_refill is None or (now - stats.last_jammer_refill) >= timedelta(hours=24):
+            stats.jammer_charges = 1
+            stats.last_jammer_refill = now
+
+    return stats
