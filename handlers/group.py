@@ -158,6 +158,191 @@ async def _show_calibration_progress(message: TgMessage, chat_id: int) -> bool:
 # 1. COMMANDS
 # ---------------------------------------------------------------------------
 
+_SCAN_COOLDOWN_HOURS = 4
+
+_SCAN_GLITCH_STATUSES = [
+    "Дикий недосып",
+    "Вечно в афк",
+    "Режим ждун",
+    "Псевдо-хакер",
+    "Скачал вирусы",
+    "Удалил System32",
+    "Перепутал порты",
+    "Кабель ногами",
+    "Чай в ноут",
+    "Пинг триста",
+    "Забыл пароль",
+    "Потерял пакеты",
+    "Профессиональный зритель",
+    "Главный по мемам",
+    "На чистом вайбе",
+    "Мастер молчания",
+    "Просто мимо проходил",
+    "В режиме невидимки",
+    "Капитан очевидность",
+]
+
+_SCAN_ANIMATION_STEPS = [
+    "📡 <code>[1/3] Подключение к защищённым частотам...</code>",
+    "🔍 <code>[2/3] Обход сетевых файрволов и дешифровка...</code>",
+]
+
+
+@router.message(Command("scan"), _GROUP_FILTER)
+async def _scan(message: TgMessage, bot: Bot) -> None:
+    """Animated ether scan mini-game. Costs 1 jammer charge, 4h cooldown."""
+    if message.from_user is None:
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = _resolve_username(message.from_user)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # Step 1: Check cooldown and charges
+    try:
+        async with get_session() as session:
+            stats = await get_or_create_user_stats(session, chat_id, user_id, username)
+
+            if stats.last_scan_at is not None:
+                elapsed = (now - stats.last_scan_at).total_seconds()
+                remaining_secs = _SCAN_COOLDOWN_HOURS * 3600 - elapsed
+                if remaining_secs > 0:
+                    remaining_h = int(remaining_secs // 3600)
+                    remaining_m = int((remaining_secs % 3600) // 60)
+                    cooldown_str = (
+                        f"{remaining_h}ч {remaining_m}мин" if remaining_h > 0 else f"{remaining_m}мин"
+                    )
+                    try:
+                        await message.reply(
+                            f"⏳ <b>[ПЕРЕХВАТ ЗАБЛОКИРОВАН]</b>\n"
+                            f"Сканер перегрет. Повторный запуск доступен через <b>{cooldown_str}</b>.",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except TelegramAPIError as e:
+                        logger.error("Failed to send scan cooldown alert: %s", e)
+                    return
+
+            if (stats.jammer_charges or 0) <= 0:
+                try:
+                    await message.reply(
+                        "⚠️ <i>Недостаточно зарядов Глушилки. Вы можете заработать их двумя способами: одержать победу в угадайке или попытать удачу в новой мини-игре /scan!</i>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except TelegramAPIError as e:
+                    logger.error("Failed to send zero charges alert: %s", e)
+                return
+
+            stats.jammer_charges -= 1
+            stats.last_scan_at = now
+            await session.commit()
+    except Exception as e:
+        logger.error("Error checking or updating stats for /scan: %s", e, exc_info=True)
+        return
+
+    # Step 2: Animate terminal (safely wrapped)
+    anim_msg = None
+    try:
+        anim_msg = await message.reply(
+            _SCAN_ANIMATION_STEPS[0],
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error("Failed to send initial /scan animation step: %s", e)
+
+    if anim_msg:
+        await asyncio.sleep(1.1)
+        try:
+            await anim_msg.edit_text(_SCAN_ANIMATION_STEPS[1], parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error("Failed to edit /scan animation to step 2: %s", e)
+
+        await asyncio.sleep(1.2)
+
+    # Step 3: Roll outcome
+    roll = random.random()
+    if roll < 0.50:
+        outcome = "empty"
+    elif roll < 0.85:
+        outcome = "success"
+    elif roll < 0.95:
+        outcome = "jackpot"
+    else:
+        outcome = "glitch"
+
+    # Apply outcome
+    try:
+        async with get_session() as session:
+            stats = await get_or_create_user_stats(session, chat_id, user_id, username)
+
+            if outcome == "success":
+                stats.jammer_charges = (stats.jammer_charges or 0) + 1
+                result_text = (
+                    "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "✅ <b>Узел успешно перехвачен!</b>\n"
+                    f"Получен <b>+1 заряд Глушилки</b>. "
+                    f"Текущий баланс: <b>{stats.jammer_charges}</b> 🔋"
+                )
+            elif outcome == "jackpot":
+                stats.jammer_charges = (stats.jammer_charges or 0) + 3
+                result_text = (
+                    "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🎰 <b>ДЖЕКПОТ! Крупный улов!</b>\n"
+                    "Обнаружен закрытый корпоративный шлюз. "
+                    f"Получено сразу <b>+3 заряда Глушилки</b>! "
+                    f"Текущий баланс: <b>{stats.jammer_charges}</b> 🔋"
+                )
+            elif outcome == "glitch":
+                ironic_status = random.choice(_SCAN_GLITCH_STATUSES)
+                stats.custom_status = ironic_status
+                stats.custom_status_by = "Сканер"
+                stats.custom_status_until = now + timedelta(hours=24)
+                result_text = (
+                    "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "⚠️ <b>ВНИМАНИЕ! Обратная волна зафиксирована!</b>\n"
+                    "Заряд сгорел, а в реестре зафиксирован новый позывной: "
+                    f"<b>«{html.escape(ironic_status)}»</b>\n\n"
+                    "<i>Проверьте свой профиль через /top!</i>"
+                )
+            else:  # empty
+                result_text = (
+                    "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "📭 <b>Пустой эфир.</b>\n"
+                    "<i>Сигнал зашумлен, частота пуста. "
+                    "Заряд утерян в киберпространстве.</i>"
+                )
+
+            await session.commit()
+    except Exception as e:
+        logger.error("Error applying /scan outcome to DB: %s", e, exc_info=True)
+        result_text = (
+            "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📭 <b>Пустой эфир.</b>\n"
+            "<i>Сигнал зашумлен, частота пуста. "
+            "Заряд утерян в киберпространстве.</i>"
+        )
+
+    # Final step: Edit message or fallback to send_message
+    edited = False
+    if anim_msg:
+        try:
+            await anim_msg.edit_text(result_text, parse_mode=ParseMode.HTML)
+            edited = True
+        except Exception as e:
+            logger.error("Failed to edit /scan message to final result: %s", e)
+
+    if not edited:
+        try:
+            await bot.send_message(chat_id, result_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error("Failed to send /scan result fallback: %s", e)
+
+
 @router.message(Command("dossier"), _GROUP_FILTER)
 async def _group_dossier(message: TgMessage, bot: Bot) -> None:
     """Send personal dossier to user's DM and launch detector mini-game in group."""
@@ -1329,169 +1514,3 @@ async def _track_membership(event: ChatMemberUpdated, bot: Bot) -> None:
             await bot.send_message(chat_id, WELCOME_MESSAGE, parse_mode=ParseMode.HTML)
         except TelegramAPIError:
             logger.debug("Failed to send welcome message to chat %s", chat_id)
-
-
-# ---------------------------------------------------------------------------
-# /scan — Animated Ether Scan mini-game (groups only)
-# ---------------------------------------------------------------------------
-
-_SCAN_COOLDOWN_HOURS = 4
-
-_SCAN_GLITCH_STATUSES = [
-    "Дикий недосып",
-    "Вечно в афк",
-    "Режим ждун",
-    "Псевдо-хакер",
-    "Скачал вирусы",
-    "Удалил System32",
-    "Перепутал порты",
-    "Кабель ногами",
-    "Чай в ноут",
-    "Пинг триста",
-    "Забыл пароль",
-    "Потерял пакеты",
-    "Профессиональный зритель",
-    "Главный по мемам",
-    "На чистом вайбе",
-    "Мастер молчания",
-    "Просто мимо проходил",
-    "В режиме невидимки",
-    "Капитан очевидность",
-]
-
-_SCAN_ANIMATION_STEPS = [
-    "📡 <code>[1/3] Подключение к защищённым частотам...</code>",
-    "🔍 <code>[2/3] Обход сетевых файрволов и дешифровка...</code>",
-]
-
-
-@router.message(Command("scan"), _GROUP_FILTER)
-async def _scan(message: TgMessage, bot: Bot) -> None:
-    """Animated ether scan mini-game. Costs 1 jammer charge, 4h cooldown."""
-    if message.from_user is None:
-        return
-
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    username = _resolve_username(message.from_user)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-
-    # Step 1: Check cooldown and charges
-    async with get_session() as session:
-        stats = await get_or_create_user_stats(session, chat_id, user_id, username)
-
-        if stats.last_scan_at is not None:
-            elapsed = (now - stats.last_scan_at).total_seconds()
-            remaining_secs = _SCAN_COOLDOWN_HOURS * 3600 - elapsed
-            if remaining_secs > 0:
-                remaining_h = int(remaining_secs // 3600)
-                remaining_m = int((remaining_secs % 3600) // 60)
-                cooldown_str = (
-                    f"{remaining_h}ч {remaining_m}мин" if remaining_h > 0 else f"{remaining_m}мин"
-                )
-                try:
-                    await message.reply(
-                        f"⏳ <b>[ПЕРЕХВАТ ЗАБЛОКИРОВАН]</b>\n"
-                        f"Сканер перегрет. Повторный запуск доступен через <b>{cooldown_str}</b>.",
-                        parse_mode=ParseMode.HTML,
-                    )
-                except TelegramAPIError:
-                    pass
-                return
-
-        if (stats.jammer_charges or 0) <= 0:
-            try:
-                await message.reply(
-                    "⚠️ <i>Недостаточно зарядов Глушилки. Вы можете заработать их двумя способами: одержать победу в угадайке или попытать удачу в новой мини-игре /scan!</i>",
-                    parse_mode=ParseMode.HTML,
-                )
-            except TelegramAPIError:
-                pass
-            return
-
-        stats.jammer_charges -= 1
-        stats.last_scan_at = now
-        await session.commit()
-
-    # Step 2: Animate terminal (non-blocking edits)
-    try:
-        anim_msg = await message.reply(
-            _SCAN_ANIMATION_STEPS[0],
-            parse_mode=ParseMode.HTML,
-        )
-    except TelegramAPIError:
-        return
-
-    await asyncio.sleep(1.1)
-    try:
-        await anim_msg.edit_text(_SCAN_ANIMATION_STEPS[1], parse_mode=ParseMode.HTML)
-    except TelegramAPIError:
-        pass
-
-    await asyncio.sleep(1.2)
-
-    # Step 3: Roll outcome
-    roll = random.random()
-    if roll < 0.50:
-        outcome = "empty"
-    elif roll < 0.85:
-        outcome = "success"
-    elif roll < 0.95:
-        outcome = "jackpot"
-    else:
-        outcome = "glitch"
-
-    # Apply outcome
-    async with get_session() as session:
-        stats = await get_or_create_user_stats(session, chat_id, user_id, username)
-
-        if outcome == "success":
-            stats.jammer_charges = (stats.jammer_charges or 0) + 1
-            result_text = (
-                "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "✅ <b>Узел успешно перехвачен!</b>\n"
-                f"Получен <b>+1 заряд Глушилки</b>. "
-                f"Текущий баланс: <b>{stats.jammer_charges}</b> 🔋"
-            )
-        elif outcome == "jackpot":
-            stats.jammer_charges = (stats.jammer_charges or 0) + 3
-            result_text = (
-                "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "🎰 <b>ДЖЕКПОТ! Крупный улов!</b>\n"
-                "Обнаружен закрытый корпоративный шлюз. "
-                f"Получено сразу <b>+3 заряда Глушилки</b>! "
-                f"Текущий баланс: <b>{stats.jammer_charges}</b> 🔋"
-            )
-        elif outcome == "glitch":
-            ironic_status = random.choice(_SCAN_GLITCH_STATUSES)
-            stats.custom_status = ironic_status
-            stats.custom_status_by = "Сканер"
-            stats.custom_status_until = now + timedelta(hours=24)
-            result_text = (
-                "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "⚠️ <b>ВНИМАНИЕ! Обратная волна зафиксирована!</b>\n"
-                "Заряд сгорел, а в реестре зафиксирован новый позывной: "
-                f"<b>«{html.escape(ironic_status)}»</b>\n\n"
-                "<i>Проверьте свой профиль через /top!</i>"
-            )
-        else:  # empty
-            result_text = (
-                "📡 <b>[3/3] СКАНИРОВАНИЕ ЗАВЕРШЕНО</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "📭 <b>Пустой эфир.</b>\n"
-                "<i>Сигнал зашумлен, частота пуста. "
-                "Заряд утерян в киберпространстве.</i>"
-            )
-
-        await session.commit()
-
-    try:
-        await anim_msg.edit_text(result_text, parse_mode=ParseMode.HTML)
-    except TelegramAPIError:
-        try:
-            await bot.send_message(chat_id, result_text, parse_mode=ParseMode.HTML)
-        except TelegramAPIError:
-            logger.debug("Failed to send scan result to chat %s", chat_id)
