@@ -469,11 +469,12 @@ async def _start_dossier_game(
             game_id = game.id
 
         me = await bot.get_me()
+        bot_user = me.username or "shadow_vulture_graph_bot"
         builder = InlineKeyboardBuilder()
         for opt in options:
             builder.button(text=f"@{opt}", callback_data=f"dg_vote:{game_id}:{opt}")
         builder.button(text="🛡 Включить глушилку", callback_data=f"dg_jam:{game_id}")
-        builder.button(text="📂 Открыть своё досье в ЛС", callback_data=f"dg_dm:{game_id}")
+        builder.button(text="📂 Открыть своё досье в ЛС", url=f"https://t.me/{bot_user}?start=dossier")
         builder.adjust(2, 2, 1, 1)
 
         text = (

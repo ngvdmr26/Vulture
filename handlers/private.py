@@ -80,6 +80,17 @@ async def _start(message: TgMessage, bot: Bot) -> None:
     """Send the animated welcome message."""
     start_parts = message.text.split() if message.text else []
     if len(start_parts) > 1 and start_parts[1].lower() == "dossier":
+        from handlers.group import _dossier_delivered_users
+        if message.from_user and message.from_user.id in _dossier_delivered_users:
+            try:
+                await message.answer(
+                    "📂 <b>[VULTURE // ЛИЧНОЕ ДОСЬЕ]</b>\n\n"
+                    "Ваше персональное досье уже сформировано и находится выше в этой переписке! 👆",
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramAPIError:
+                pass
+            return
         await _dossier(message, bot)
         return
 
