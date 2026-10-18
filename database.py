@@ -251,10 +251,4 @@ async def get_or_create_user_stats(
     if username and stats.username != username:
         stats.username = username
 
-    # Auto-refill jammer up to 1 free charge every 24 hours
-    if (stats.jammer_charges or 0) < 1:
-        if stats.last_jammer_refill is None or (now - stats.last_jammer_refill) >= timedelta(hours=24):
-            stats.jammer_charges = 1
-            stats.last_jammer_refill = now
-
     return stats

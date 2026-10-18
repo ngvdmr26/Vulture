@@ -183,7 +183,20 @@ async def _group_dossier(message: TgMessage, bot: Bot) -> None:
             pass
         return
 
-    # Attempt to deliver private dossier to DM
+    # Attempt to deliver private dossier to DM (once)
+    await _send_dossier_to_dm(bot, chat_id, user_id, metrics)
+
+    # Launch detector mini-game directly in group (only one neat interactive message)
+    await _start_dossier_game(message, bot, chat_id, user_id, username, metrics)
+
+
+_dossier_delivered_users: set[int] = set()
+
+
+async def _send_dossier_to_dm(bot: Bot, chat_id: int, user_id: int, metrics: dict) -> bool:
+    """Send personal dossier card to DM if not already sent. Returns True if sent."""
+    if user_id in _dossier_delivered_users:
+        return False
     try:
         profile = await generate_profile(metrics)
         card_data = {**metrics, **profile}
@@ -208,11 +221,11 @@ async def _group_dossier(message: TgMessage, bot: Bot) -> None:
             caption=dm_caption,
             parse_mode=ParseMode.HTML,
         )
+        _dossier_delivered_users.add(user_id)
+        return True
     except Exception:
         logger.debug("Could not deliver DM dossier to user %s", user_id)
-
-    # Launch detector mini-game directly in group (only one neat interactive message)
-    await _start_dossier_game(message, bot, chat_id, user_id, username, metrics)
+        return False
 
 
 async def _start_dossier_game(
@@ -275,7 +288,7 @@ async def _start_dossier_game(
         for opt in options:
             builder.button(text=f"@{opt}", callback_data=f"dg_vote:{game_id}:{opt}")
         builder.button(text="🛡 Включить глушилку", callback_data=f"dg_jam:{game_id}")
-        builder.button(text="📂 Открыть своё досье в ЛС", url=f"https://t.me/{me.username}?start=dossier")
+        builder.button(text="📂 Открыть своё досье в ЛС", callback_data=f"dg_dm:{game_id}")
         builder.adjust(2, 2, 1, 1)
 
         text = (
@@ -444,7 +457,7 @@ async def _dg_jam_callback(callback: CallbackQuery, bot: Bot) -> None:
         if (stats.jammer_charges or 0) <= 0:
             try:
                 await callback.answer(
-                    "У вас нет зарядов Глушилки! Они пополняются раз в 24ч или за правильные угадывания чужих целей.",
+                    "⚠️ Недостаточно зарядов Глушилки. Вы можете заработать их двумя способами: одержать победу в угадайке или попытать удачу в новой мини-игре /scan!",
                     show_alert=True,
                 )
             except TelegramAPIError:
@@ -476,6 +489,46 @@ async def _dg_jam_callback(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Глушилка активирована! Данные скрыты.")
     except TelegramAPIError:
         pass
+
+
+@router.callback_query(F.data.startswith("dg_dm:"))
+async def _dg_dm_callback(callback: CallbackQuery, bot: Bot) -> None:
+    """Handle click on 'Открыть своё досье в ЛС' button in group mini-game."""
+    if callback.from_user is None or callback.message is None:
+        return
+
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
+    if user_id in _dossier_delivered_users:
+        try:
+            await callback.answer("Карточка уже отправлена в ваши личные сообщения!", show_alert=True)
+        except TelegramAPIError:
+            pass
+        return
+
+    metrics = await get_user_metrics(chat_id, user_id, days=30)
+    if not metrics:
+        try:
+            await callback.answer("В базе пока недостаточно данных для вашего досье.", show_alert=True)
+        except TelegramAPIError:
+            pass
+        return
+
+    sent = await _send_dossier_to_dm(bot, chat_id, user_id, metrics)
+    if sent:
+        try:
+            await callback.answer("Карточка успешно отправлена в ваши личные сообщения!", show_alert=True)
+        except TelegramAPIError:
+            pass
+    else:
+        try:
+            await callback.answer(
+                "Не удалось отправить сообщение в ЛС. Напишите боту /start в личные сообщения!",
+                show_alert=True,
+            )
+        except TelegramAPIError:
+            pass
 
 
 @router.message(Command("top"), _GROUP_FILTER)
@@ -1288,7 +1341,12 @@ _SCAN_GLITCH_STATUSES = [
     "Дикий недосып",
     "Вечно в афк",
     "Режим ждун",
+    "Псевдо-хакер",
     "Скачал вирусы",
+    "Удалил System32",
+    "Перепутал порты",
+    "Кабель ногами",
+    "Чай в ноут",
     "Пинг триста",
     "Забыл пароль",
     "Потерял пакеты",
@@ -1344,9 +1402,7 @@ async def _scan(message: TgMessage, bot: Bot) -> None:
         if (stats.jammer_charges or 0) <= 0:
             try:
                 await message.reply(
-                    "🔋 <b>[ЗАРЯД ИСЧЕРПАН]</b>\n\n"
-                    "<i>Недостаточно зарядов. Добывайте их в тотализаторе, "
-                    "угадайке или ждите ежедневный перехват.</i>",
+                    "⚠️ <i>Недостаточно зарядов Глушилки. Вы можете заработать их двумя способами: одержать победу в угадайке или попытать удачу в новой мини-игре /scan!</i>",
                     parse_mode=ParseMode.HTML,
                 )
             except TelegramAPIError:
