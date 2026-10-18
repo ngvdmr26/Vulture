@@ -96,7 +96,7 @@ class UserGroupStats(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
-    jammer_charges: Mapped[int] = mapped_column(Integer, default=1)
+    jammer_charges: Mapped[int] = mapped_column(Integer, default=2)
     last_jammer_refill: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     brand_charges: Mapped[int] = mapped_column(Integer, default=0)
     custom_status: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
@@ -105,6 +105,7 @@ class UserGroupStats(Base):
     bonus_influence: Mapped[float] = mapped_column(Float, default=0.0)
     correct_guesses_count: Mapped[int] = mapped_column(Integer, default=0)
     last_dossier_game_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
 
 class PurgeBet(Base):
@@ -191,6 +192,7 @@ async def init_db(url: str | None = None) -> None:
             # Safe column migrations for existing databases
             migrations = [
                 "ALTER TABLE groups ADD COLUMN is_initialized BOOLEAN NOT NULL DEFAULT 0",
+                "ALTER TABLE user_group_stats ADD COLUMN last_scan_at DATETIME",
             ]
             for sql in migrations:
                 try:
@@ -198,6 +200,15 @@ async def init_db(url: str | None = None) -> None:
                     logger.info("Migration applied: %s", sql[:60])
                 except Exception:
                     pass  # Column already exists
+
+            # v2.0 starter grant: bump existing users from 1 → 2 jammer charges
+            try:
+                await conn.execute(
+                    text("UPDATE user_group_stats SET jammer_charges = 2 WHERE jammer_charges <= 1")
+                )
+                logger.info("v2.0 starter grant: existing users bumped to 2 jammer charges")
+            except Exception:
+                logger.debug("v2.0 starter grant skipped (table may not exist yet)")
 
     logger.info("Database initialised – tables ready (%s)", url.split("://")[0])
 
@@ -230,7 +241,7 @@ async def get_or_create_user_stats(
             chat_id=chat_id,
             user_id=user_id,
             username=username,
-            jammer_charges=1,
+            jammer_charges=2,  # v2.0 starting bonus
             last_jammer_refill=now,
         )
         session.add(stats)

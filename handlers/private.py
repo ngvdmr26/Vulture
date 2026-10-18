@@ -51,6 +51,7 @@ START_MESSAGE = (
     "📡 <b>Команды для группы:</b>\n"
     "• <code>/top</code> — рейтинг влияния участников\n"
     "• <code>/sync</code> — анализ связи между двумя людьми\n"
+    "• <code>/scan</code> — сканирование эфира (мини-игра, 1 заряд)\n"
     "• <code>/bets</code> — тотализатор Судного дня\n"
     "• <code>/brand</code> — навесить клеймо на участника\n\n"
     "<i>Никакие тексты сообщений не сохраняются — только метаданные.</i>\n\n"
@@ -107,6 +108,10 @@ _DM_GROUP_ONLY = (
     "Добавьте бота в группу и используйте команду там."
 )
 
+_DM_SCAN_ONLY = (
+    "📡 <i>Сканирование эфира доступно только внутри защищённых периметров групповых чатов!</i>"
+)
+
 
 @router.message(Command("top"), F.chat.type == "private")
 async def _top_private(message: TgMessage) -> None:
@@ -124,6 +129,16 @@ async def _sync_private(message: TgMessage) -> None:
         await message.answer(_DM_GROUP_ONLY, parse_mode=ParseMode.HTML)
     except TelegramAPIError as exc:
         logger.error("Failed to send /sync DM stub: %s", exc)
+
+
+@router.message(Command("scan"), F.chat.type == "private")
+async def _scan_private(message: TgMessage) -> None:
+    """Tell user that /scan only works in groups."""
+    try:
+        await message.answer(_DM_SCAN_ONLY, parse_mode=ParseMode.HTML)
+    except TelegramAPIError as exc:
+        logger.error("Failed to send /scan DM stub: %s", exc)
+
 
 
 # ---------------------------------------------------------------------------
