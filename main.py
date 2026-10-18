@@ -60,7 +60,13 @@ _V2_BROADCAST_TEXT = (
 
 
 async def broadcast_v2_update(bot) -> None:
-    """Send the v2.0 announcement to all active groups. Safe fire-and-forget."""
+    """Send the v2.0 announcement to all active groups. One-shot, safe fire-and-forget."""
+    import os
+    marker = os.path.join(os.path.dirname(__file__), ".broadcast_v2_sent")
+    if os.path.exists(marker):
+        logger.info("broadcast_v2_update: marker found, skipping (already sent)")
+        return
+
     try:
         async with get_session() as session:
             res = await session.execute(select(Group).where(Group.is_active.is_(True)))
@@ -73,9 +79,11 @@ async def broadcast_v2_update(bot) -> None:
     from aiogram.exceptions import TelegramForbiddenError, TelegramAPIError as TgAPIError
     from aiogram.enums import ParseMode as PM
 
+    sent_count = 0
     for grp in groups:
         try:
             await bot.send_message(grp.chat_id, _V2_BROADCAST_TEXT, parse_mode=PM.HTML)
+            sent_count += 1
         except TelegramForbiddenError:
             # Bot was removed — mark inactive
             try:
@@ -90,7 +98,15 @@ async def broadcast_v2_update(bot) -> None:
             logger.debug("broadcast_v2_update: bot removed from chat %s, marked inactive", grp.chat_id)
         except TgAPIError:
             logger.debug("broadcast_v2_update: failed to send to chat %s", grp.chat_id)
-        await asyncio.sleep(0.35)  # ~3 msgs/sec to stay inside Telegram flood limits
+        await asyncio.sleep(0.35)  # ~3 msgs/sec — inside Telegram flood limits
+
+    # Write marker so next restart doesn't re-broadcast
+    try:
+        with open(marker, "w") as f:
+            f.write(f"sent={sent_count}\n")
+        logger.info("broadcast_v2_update: done, sent to %d groups. Marker written.", sent_count)
+    except Exception:
+        logger.warning("broadcast_v2_update: could not write marker file")
 
 
 async def main() -> None:

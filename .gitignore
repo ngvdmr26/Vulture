@@ -34,3 +34,6 @@ assets/fonts/*.ttf
 dist/
 build/
 .aider*
+
+# Broadcast one-shot markers
+.broadcast_v2_sent
