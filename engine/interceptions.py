@@ -63,6 +63,13 @@ async def _check_and_fire(
     umap = user_map or {}
     fired = False
 
+    def _fmt_user(uid: int) -> str:
+        """Return @username if known, otherwise a clickable tg:// profile link."""
+        name = umap.get(uid)
+        if name and not name.startswith("id_"):
+            return f"@{name}"
+        return f'<a href="tg://user?id={uid}">Участник</a>'
+
     # --- Trigger 1: Leader change in top-3 ---
     top3 = data["top3_uids"]
     old_top3 = _last_top3.get(chat_id, [])
@@ -73,15 +80,15 @@ async def _check_and_fire(
         and len(old_top3) >= 2
         and (top3[0] != old_top3[0] or top3[1] != old_top3[1])
     ):
-        leader = umap.get(top3[0], f"id_{top3[0]}")
-        second = umap.get(top3[1], f"id_{top3[1]}")
+        leader = _fmt_user(top3[0])
+        second = _fmt_user(top3[1])
         try:
             await bot.send_message(
                 chat_id,
                 f"⚡ <b>[VULTURE // ПЕРЕХВАТ ВЛАСТИ]</b>\n\n"
                 f"В иерархии чата произошел сдвиг. Новый лидер влияния:\n"
-                f"👑 <b>@{leader}</b> — захватил вершину графа\n"
-                f"#2: <b>@{second}</b>\n\n"
+                f"👑 <b>{leader}</b> — захватил вершину графа\n"
+                f"#2: <b>{second}</b>\n\n"
                 f"<i>Данные обновлены в реальном времени по паттернам последних 7 дней.</i>",
                 parse_mode=ParseMode.HTML,
             )
@@ -96,11 +103,15 @@ async def _check_and_fire(
 
     # --- Trigger 2: Anomalous resonance (>= 10 replies in 15 min) ---
     for uid_a, uid_b, cnt in data["hot_pairs"]:
-        name_a = umap.get(uid_a, f"id_{uid_a}")
-        name_b = umap.get(uid_b, f"id_{uid_b}")
+        name_a = _fmt_user(uid_a)
+        name_b = _fmt_user(uid_b)
+        uname_a = umap.get(uid_a, "")
+        uname_b = umap.get(uid_b, "")
+        btn_label_a = f"@{uname_a}" if uname_a and not uname_a.startswith("id_") else f"Участник {uid_a}"
+        btn_label_b = f"@{uname_b}" if uname_b and not uname_b.startswith("id_") else f"Участник {uid_b}"
         builder = InlineKeyboardBuilder()
         builder.button(
-            text=f"🔗 Проверить связь @{name_a} + @{name_b}",
+            text=f"🔗 Проверить связь {btn_label_a} + {btn_label_b}",
             callback_data=f"sync:{uid_a}:{uid_b}",
         )
         try:
@@ -108,7 +119,7 @@ async def _check_and_fire(
                 chat_id,
                 f"🚨 <b>[VULTURE // АНОМАЛЬНЫЙ РЕЗОНАНС]</b>\n\n"
                 f"Зафиксировано <b>{cnt}</b> ответов на сообщения между двумя узлами за 15 минут.\n"
-                f"Подозреваемые: <b>@{name_a}</b> ↔ <b>@{name_b}</b>\n\n"
+                f"Подозреваемые: <b>{name_a}</b> ↔ <b>{name_b}</b>\n\n"
                 f"<i>Уровень синхронизации превышает норму в 3–4 раза.</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=builder.as_markup(),
@@ -124,12 +135,12 @@ async def _check_and_fire(
 
     # --- Trigger 3: Protocol of silence (5+ messages, 0 replies) ---
     for uid in data["silent_victims"]:
-        name = umap.get(uid, f"id_{uid}")
+        name = _fmt_user(uid)
         try:
             await bot.send_message(
                 chat_id,
                 f"💀 <b>[VULTURE // ПРОТОКОЛ ТИШИНЫ]</b>\n\n"
-                f"Узел <b>@{name}</b> активно пишет, но не получает ответов.\n"
+                f"Узел <b>{name}</b> активно пишет, но не получает ответов.\n"
                 f"5+ сообщений подряд — ноль реакций. Социальная изоляция зафиксирована.\n\n"
                 f"<i>Это нормальное явление при доминировании одного-двух голосов в чате.</i>",
                 parse_mode=ParseMode.HTML,
