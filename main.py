@@ -125,9 +125,12 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Fetch bot identity and cache it
-    me = await bot.get_me()
-    logger.info("Starting Vulture as @%s (id=%s)", me.username, me.id)
+    # Fetch bot identity with fallback
+    try:
+        me = await asyncio.wait_for(bot.get_me(), timeout=15.0)
+        logger.info("Starting Vulture as @%s (id=%s)", me.username, me.id)
+    except Exception as e:
+        logger.warning("Could not fetch bot identity on startup (%s). Proceeding anyway...", e)
 
     # Initialise database (creates tables on first run)
     await init_db()
@@ -138,17 +141,24 @@ async def main() -> None:
     dp.include_router(private_router)
     dp.include_router(group_router)
 
-    # Register bot commands for the Telegram menu
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Запуск бота / справка"),
-        BotCommand(command="top", description="Рейтинг влияния участников"),
-        BotCommand(command="sync", description="Анализ связи двух участников"),
-        BotCommand(command="dossier", description="Персональное досье"),
-        BotCommand(command="scan", description="Сканирование эфира (мини-игра, 1 заряд Глушилки)"),
-        BotCommand(command="brand", description="Навесить статус на участника (Чёрная метка)"),
-        BotCommand(command="bets", description="Открыть меню ставок Тотализатора (чтобы не искать сообщение в чате)"),
-        BotCommand(command="feedback", description="Связь с разработчиком (баги, идеи)"),
-    ])
+    # Register bot commands for the Telegram menu (background/non-blocking)
+    async def _setup_commands():
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="start", description="Запуск бота / справка"),
+                BotCommand(command="top", description="Рейтинг влияния участников"),
+                BotCommand(command="sync", description="Анализ связи двух участников"),
+                BotCommand(command="dossier", description="Персональное досье"),
+                BotCommand(command="scan", description="Сканирование эфира (мини-игра, 1 заряд Глушилки)"),
+                BotCommand(command="brand", description="Навесить статус на участника (Чёрная метка)"),
+                BotCommand(command="bets", description="Открыть меню ставок Тотализатора (чтобы не искать сообщение в чате)"),
+                BotCommand(command="feedback", description="Связь с разработчиком (баги, идеи)"),
+            ])
+            logger.info("Bot commands successfully updated in Telegram menu.")
+        except Exception as err:
+            logger.warning("Failed to set bot commands in Telegram menu: %s", err)
+
+    asyncio.create_task(_setup_commands())
 
     # v2.0 broadcast — notify all active groups about the update (non-blocking)
     asyncio.create_task(broadcast_v2_update(bot))
