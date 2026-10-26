@@ -135,6 +135,38 @@ async def test_judgment_for_group(
         )
         pure_clown_cutoff = res_pure_clown.scalar_one() or 0
 
+        # Query ALL reactions regardless of emoji in this chat
+        res_any = await session.execute(
+            select(Reaction.reaction_type, func.count(Reaction.id))
+            .where(Reaction.chat_id == chat_id)
+            .group_by(Reaction.reaction_type)
+        )
+        any_reactions = res_any.all()
+
+        # Query latest messages in this chat
+        res_recent_msgs = await session.execute(
+            select(Message.message_id, Message.user_id, Message.username, Message.timestamp)
+            .where(Message.chat_id == chat_id)
+            .order_by(Message.timestamp.desc())
+            .limit(5)
+        )
+        recent_msgs = res_recent_msgs.all()
+
+    total_any_count = sum(cnt for _, cnt in any_reactions)
+    print(f"  • Найдено 🤡 реакций за последние {days} дн.: {pure_clown_cutoff}")
+    print(f"  • Всего токсичных (🤡,💩,🤮) за {days} дн.: {len(recent_reactions)}")
+    print(f"  • Всего токсичных реакций за всё время:      {total_all_time}")
+    print(f"  • Всего ЛЮБЫХ реакций (все эмодзи) в чате:   {total_any_count}")
+    if any_reactions:
+        print(f"    Типы реакций в БД: {dict(any_reactions)}")
+    else:
+        print("    ℹ️ В таблице 'reactions' вообще нет записей ни для каких эмодзи.")
+
+    if recent_msgs:
+        print(f"\n  📝 Последние сообщения из чата, зафиксированные ботом:")
+        for m in recent_msgs:
+            print(f"    • msg_id={m.message_id} | @{m.username or 'unknown'} (uid: {m.user_id}) | {m.timestamp} UTC")
+
     print(f"  • Найдено 🤡 реакций за последние {days} дн.: {pure_clown_cutoff}")
     print(f"  • Всего токсичных (🤡,💩,🤮) за {days} дн.: {len(recent_reactions)}")
     print(f"  • Всего токсичных реакций за всё время:      {total_all_time}")
