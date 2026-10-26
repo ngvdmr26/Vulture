@@ -308,6 +308,28 @@ async def main() -> None:
         for m in latest_msgs:
             print(f"    - msg_id={m.message_id} | @{m.username or 'unknown'} | {m.timestamp} UTC")
 
+    # --- RAW DUMP OF REACTIONS TABLE (SELECT * FROM reactions) ---
+    print("\n" + "=" * 64)
+    print("📋 ПОЛНЫЙ ДАМП ТАБЛИЦЫ 'reactions' (SELECT * FROM reactions):")
+    print("=" * 64)
+    async with get_session() as session:
+        res_raw_rxns = await session.execute(
+            select(Reaction).order_by(Reaction.timestamp.desc())
+        )
+        raw_reactions = res_raw_rxns.scalars().all()
+
+        if not raw_reactions:
+            print("  ❌ [ТАБЛИЦА ПУСТА]: В таблице reactions ровно 0 записей.")
+            print("  Бот пока не зафиксировал ни одной реакции в БД.")
+        else:
+            print(f"  Всего записей в таблице: {len(raw_reactions)}")
+            for idx, r in enumerate(raw_reactions, 1):
+                print(
+                    f"  #{idx} ID={r.id} | chat_id={r.chat_id} | target_uid={r.target_user_id} | "
+                    f"from_uid={r.from_user_id} | emoji={repr(r.reaction_type)} | time={r.timestamp} UTC"
+                )
+    print("=" * 64 + "\n")
+
     if args.check_msg:
         print(f"\n🔍 ПРОВЕРКА СООБЩЕНИЯ msg_id={args.check_msg}:")
         async with get_session() as session:
