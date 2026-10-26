@@ -244,6 +244,36 @@ async def main() -> None:
     db_url = f"sqlite+aiosqlite:///{db_path}"
     await init_db(db_url)
 
+    # --- DB Diagnostics ---
+    async with get_session() as session:
+        msg_count = (await session.execute(select(func.count(Message.message_id)))).scalar_one() or 0
+        rxn_count = (await session.execute(select(func.count(Reaction.id)))).scalar_one() or 0
+        grp_count = (await session.execute(select(func.count(Group.chat_id)))).scalar_one() or 0
+
+        res_latest_msgs = await session.execute(
+            select(Message.message_id, Message.chat_id, Message.username, Message.timestamp)
+            .order_by(Message.timestamp.desc())
+            .limit(3)
+        )
+        latest_msgs = res_latest_msgs.all()
+
+    print(f"\n📈 СТАТУС БАЗЫ ДАННЫХ:")
+    print(f"  • Всего групп:      {grp_count}")
+    print(f"  • Всего сообщений:  {msg_count}")
+    print(f"  • Всего реакций:    {rxn_count}")
+
+    if msg_count == 0:
+        print("\n  ⚠️ ВНИМАНИЕ: В таблице 'messages' ровно 0 сообщений!")
+        print("  Telegram Bot API не сообщает автора сообщения в событии реакции.")
+        print("  Бот берет автора из таблицы 'messages'. Если сообщение не было")
+        print("  записано ботом, реакция игнорируется.")
+        print("  👉 Причина: Включен Group Privacy Mode в @BotFather.")
+        print("     Решение: Перейдите в @BotFather -> /setprivacy -> выберите бота -> Disable.")
+    elif latest_msgs:
+        print("  • Последние зафиксированные сообщения:")
+        for m in latest_msgs:
+            print(f"    - msg_id={m.message_id} | @{m.username or 'unknown'} | {m.timestamp} UTC")
+
     # Discover groups to analyze
     target_groups: list[tuple[int, str]] = []
     async with get_session() as session:

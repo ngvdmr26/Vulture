@@ -1449,7 +1449,18 @@ async def _log_media_message(message: TgMessage, bot: Bot) -> None:
 @router.message_reaction()
 async def _log_reaction(event: MessageReactionUpdated, bot: Bot) -> None:
     """Log reactions and check calibration threshold."""
+    user_id = event.user.id if event.user else None
+    emojis = [
+        getattr(rxn, "emoji", None) or getattr(rxn, "custom_emoji_id", "custom")
+        for rxn in event.new_reaction
+    ]
+    logger.info(
+        "[REACTION] Received reaction update: chat=%s, msg=%s, user=%s, emojis=%s",
+        event.chat.id, event.message_id, user_id, emojis
+    )
+
     if event.user is None:
+        logger.debug("[REACTION] Skipped: event.user is None (channel/anonymous admin)")
         return
 
     saved = False
@@ -1463,6 +1474,10 @@ async def _log_reaction(event: MessageReactionUpdated, bot: Bot) -> None:
             )
             target_uid = res.scalar_one_or_none()
             if target_uid is None:
+                logger.warning(
+                    "[REACTION] Target message %s not found in 'messages' DB for chat %s. Reaction from %s cannot be attributed and was skipped.",
+                    event.message_id, event.chat.id, event.user.id
+                )
                 return
 
             for rxn in event.new_reaction:
@@ -1477,8 +1492,12 @@ async def _log_reaction(event: MessageReactionUpdated, bot: Bot) -> None:
                 session.add(row)
             await session.commit()
             saved = True
+            logger.info(
+                "[REACTION] Successfully saved %d reaction(s) for target_user_id=%s on msg=%s in chat %s",
+                len(event.new_reaction), target_uid, event.message_id, event.chat.id
+            )
     except Exception:
-        logger.debug("Unable to persist reaction telemetry for message %s", event.message_id)
+        logger.exception("Unable to persist reaction telemetry for message %s in chat %s", event.message_id, event.chat.id)
 
     if saved:
         asyncio.create_task(_check_and_fire_calibration(bot, event.chat.id))
