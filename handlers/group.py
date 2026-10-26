@@ -25,6 +25,7 @@ from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
     Message as TgMessage,
+    MessageReactionCountUpdated,
     MessageReactionUpdated,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -1501,6 +1502,61 @@ async def _log_reaction(event: MessageReactionUpdated, bot: Bot) -> None:
 
     if saved:
         asyncio.create_task(_check_and_fire_calibration(bot, event.chat.id))
+
+
+@router.message_reaction_count()
+async def _log_reaction_count(event: MessageReactionCountUpdated, bot: Bot) -> None:
+    """Log reaction counts when reactions are anonymous or aggregated by Telegram."""
+    rxn_summary = [
+        (getattr(rc.type, "emoji", None) or getattr(rc.type, "custom_emoji_id", "custom"), rc.total_count)
+        for rc in event.reactions
+    ]
+    logger.info(
+        "[REACTION_COUNT] Received reaction_count update: chat=%s, msg=%s, reactions=%s",
+        event.chat.id, event.message_id, rxn_summary,
+    )
+    try:
+        async with get_session() as session:
+            res = await session.execute(
+                select(Message.user_id).where(
+                    Message.message_id == event.message_id,
+                    Message.chat_id == event.chat.id,
+                )
+            )
+            target_uid = res.scalar_one_or_none()
+            if target_uid is None:
+                logger.warning(
+                    "[REACTION_COUNT] Target msg %s not in DB for chat %s. Skipped.",
+                    event.message_id, event.chat.id,
+                )
+                return
+
+            event_time = (
+                event.date.replace(tzinfo=None)
+                if event.date
+                else datetime.now(timezone.utc).replace(tzinfo=None)
+            )
+
+            # Record each counted reaction in reactions table
+            for rc in event.reactions:
+                emoji = getattr(rc.type, "emoji", None) or getattr(rc.type, "custom_emoji_id", "custom")
+                for _ in range(rc.total_count):
+                    session.add(
+                        Reaction(
+                            chat_id=event.chat.id,
+                            target_user_id=target_uid,
+                            from_user_id=0,
+                            reaction_type=str(emoji),
+                            timestamp=event_time,
+                        )
+                    )
+            await session.commit()
+            logger.info(
+                "[REACTION_COUNT] Saved %d reaction(s) for target_uid=%s on msg=%s in chat %s",
+                sum(rc.total_count for rc in event.reactions), target_uid, event.message_id, event.chat.id
+            )
+    except Exception:
+        logger.exception("Unable to persist reaction_count for msg %s in chat %s", event.message_id, event.chat.id)
 
 
 @router.my_chat_member()

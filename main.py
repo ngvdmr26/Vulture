@@ -175,6 +175,7 @@ async def main() -> None:
                 "callback_query",
                 "my_chat_member",
                 "message_reaction",
+                "message_reaction_count",
             ],
         )
     finally:

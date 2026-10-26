@@ -163,13 +163,9 @@ async def test_judgment_for_group(
         print("    ℹ️ В таблице 'reactions' вообще нет записей ни для каких эмодзи.")
 
     if recent_msgs:
-        print(f"\n  📝 Последние сообщения из чата, зафиксированные ботом:")
+        print(f"\n  📝 Последние 5 сообщений из чата, зафиксированные ботом:")
         for m in recent_msgs:
             print(f"    • msg_id={m.message_id} | @{m.username or 'unknown'} (uid: {m.user_id}) | {m.timestamp} UTC")
-
-    print(f"  • Найдено 🤡 реакций за последние {days} дн.: {pure_clown_cutoff}")
-    print(f"  • Всего токсичных (🤡,💩,🤮) за {days} дн.: {len(recent_reactions)}")
-    print(f"  • Всего токсичных реакций за всё время:      {total_all_time}")
 
     if not recent_reactions:
         print("\n  ℹ️ За последние 7 дней реакций 🤡 не зафиксировано.")
@@ -254,6 +250,12 @@ async def main() -> None:
         help="Только расчет без записи статуса в БД",
     )
     parser.add_argument(
+        "--check-msg",
+        type=int,
+        default=None,
+        help="Проверить наличие конкретного message_id в таблице messages",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Внедрить 1 тестовую реакцию 🤡 для проверки, если база чистая",
@@ -305,6 +307,21 @@ async def main() -> None:
         print("  • Последние зафиксированные сообщения:")
         for m in latest_msgs:
             print(f"    - msg_id={m.message_id} | @{m.username or 'unknown'} | {m.timestamp} UTC")
+
+    if args.check_msg:
+        print(f"\n🔍 ПРОВЕРКА СООБЩЕНИЯ msg_id={args.check_msg}:")
+        async with get_session() as session:
+            res_m = await session.execute(select(Message).where(Message.message_id == args.check_msg))
+            found_msg = res_m.scalar_one_or_none()
+            if found_msg:
+                print(f"  ✅ Сообщение НАЙДЕНО в базе!")
+                print(f"     • Автор: @{found_msg.username or 'unknown'} (uid: {found_msg.user_id})")
+                print(f"     • Чат ID: {found_msg.chat_id}")
+                print(f"     • Время:  {found_msg.timestamp} UTC")
+            else:
+                print(f"  ❌ Сообщение msg_id={args.check_msg} НЕ НАЙДЕНО в базе данных!")
+                print("     (Поэтому любые реакции на него бот отбрасывает).")
+        return
 
     # Discover groups to analyze
     target_groups: list[tuple[int, str]] = []
